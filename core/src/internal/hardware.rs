@@ -265,9 +265,9 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
             info!("NV110 family (Maxwell)");
             matched_family = true;
             match kernel {
-                "linux" => packages.push("nvidia"),
-                "linux-lts" => packages.push("nvidia-lts"),
-                _ => packages.push("nvidia-dkms"),
+                "linux" => packages.push("nvidia-open"),
+                "linux-lts" => packages.push("nvidia-open-lts"),
+                _ => packages.push("nvidia-open-dkms"),
             }
             packages.push("nvidia-settings");
         }
@@ -279,6 +279,7 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
             matched_family = true;
             match kernel {
                 "linux" => packages.push("nvidia-open"),
+                "linux-lts" => packages.push("nvidia-open-lts"),
                 _ => packages.push("nvidia-open-dkms"),
             }
             packages.push("nvidia-settings");
@@ -311,7 +312,12 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
         {
             info!("NV50 family (Tesla)");
             matched_family = true;
-            packages.extend(["nvidia-340xx-dkms", "nvidia-340xx-settings"]);
+            match kernel {
+                "linux" => packages.push("nvidia-340xx"),
+                "linux-lts" => packages.push("nvidia-340xx-lts"),
+                _ => packages.push("nvidia-340xx-lts-dkms"),
+            }
+            packages.push("nvidia-340xx-settings");
         }
     
         if !matched_family {
