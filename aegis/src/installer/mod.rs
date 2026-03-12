@@ -8,6 +8,7 @@ use std::{
   process::{Command, Stdio},
   sync::mpsc::{self, Receiver},
   thread,
+  time::{Duration, Instant},
 };
 
 use ansi_to_tui::IntoText;
@@ -19,7 +20,7 @@ use ratatui::{
   prelude::Alignment,
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, Borders, Paragraph, Wrap},
+  widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use base64::Engine as _;
 use flate2::read::GzDecoder;
@@ -4576,6 +4577,231 @@ pub struct InstallProgress<'a> {
   _log_file: PathBuf,
 }
 
+pub struct AgeVerification<'a> {
+  installer: Installer,
+  system_cfg: Option<NamedTempFile>,
+  partition_cfg: Option<NamedTempFile>,
+  log_path: PathBuf,
+  started_at: Instant,
+  skipped_animation: bool,
+  selected_button: usize,
+  button_row: WidgetBox,
+  help_modal: HelpModal<'static>,
+  _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> AgeVerification<'a> {
+  pub fn new(
+    installer: Installer,
+    system_cfg: NamedTempFile,
+    partition_cfg: NamedTempFile,
+    log_path: PathBuf,
+  ) -> Self {
+    let mut button_row = WidgetBox::button_menu(vec![
+      Box::new(Button::new("I am overqualified")) as Box<dyn ConfigWidget>,
+      Box::new(Button::new("I am not")) as Box<dyn ConfigWidget>,
+    ]);
+
+    let help_modal = HelpModal::new(
+      "Age verification",
+      styled_block(vec![
+        vec![(Some((Color::Yellow, Modifier::BOLD)), "Enter"), (None, " - continue to installation")],
+        vec![(Some((Color::Yellow, Modifier::BOLD)), "Esc"), (None, " - go back to the previous page")],
+        vec![(Some((Color::Yellow, Modifier::BOLD)), "?"), (None, " - show this help")],
+        vec![(None, "")],
+        vec![(None, "This is a serious verification process, in the sense that it has a window and a button.")],
+      ]),
+    );
+
+    button_row.focus();
+
+    Self {
+      installer,
+      system_cfg: Some(system_cfg),
+      partition_cfg: Some(partition_cfg),
+      log_path,
+      started_at: Instant::now(),
+      skipped_animation: false,
+      selected_button: 0,
+      button_row,
+      help_modal,
+      _phantom: std::marker::PhantomData,
+    }
+  }
+
+  fn reveal_joke(&self) -> bool {
+    self.skipped_animation || self.started_at.elapsed() >= Duration::from_secs(5)
+  }
+
+  fn full_joke_text() -> &'static str {
+    "Just kidding.
+Athena does not perform age verification.
+Operating systems are not nightclubs.
+
+If you can run this installer, you are already overqualified."
+  }
+
+  fn visible_joke_text(&self) -> String {
+    if self.skipped_animation {
+      return Self::full_joke_text().to_string();
+    }
+
+    if !self.reveal_joke() {
+      return String::new();
+    }
+
+    let elapsed_after_delay = self
+      .started_at
+      .elapsed()
+      .saturating_sub(Duration::from_secs(5));
+    let chars_per_second = 12usize;
+    let visible_chars = (elapsed_after_delay.as_millis() as usize * chars_per_second) / 1000;
+    let full_text = Self::full_joke_text();
+    let total_chars = full_text.chars().count();
+    let take_chars = visible_chars.min(total_chars);
+
+    full_text.chars().take(take_chars).collect()
+  }
+
+  fn joke_fully_visible(&self) -> bool {
+    self.skipped_animation || self.visible_joke_text().chars().count() >= Self::full_joke_text().chars().count()
+  }
+
+  fn popup_area(area: Rect) -> Rect {
+    let popup_width = (area.width as f32 * 0.72) as u16;
+    let popup_height = 14.min(area.height.saturating_sub(2)).max(10);
+    let x = area.x + area.width.saturating_sub(popup_width) / 2;
+    let y = area.y + area.height.saturating_sub(popup_height) / 2;
+
+    Rect { x, y, width: popup_width, height: popup_height }
+  }
+
+  fn start_install(&mut self) -> Signal {
+    let Some(system_cfg) = self.system_cfg.take() else {
+      return Signal::Error(anyhow::anyhow!("System config temp file already consumed"));
+    };
+
+    let Some(partition_cfg) = self.partition_cfg.take() else {
+      return Signal::Error(anyhow::anyhow!("Partition config temp file already consumed"));
+    };
+
+    match InstallProgress::new(
+      self.installer.clone(),
+      system_cfg,
+      partition_cfg,
+      self.log_path.clone(),
+    ) {
+      Ok(progress) => Signal::Push(Box::new(progress)),
+      Err(err) => Signal::Error(err),
+    }
+  }
+}
+
+impl<'a> Page for AgeVerification<'a> {
+  fn render(&mut self, _installer: &mut Installer, f: &mut Frame, area: Rect) {
+    let popup_area = Self::popup_area(area);
+    f.render_widget(Clear, popup_area);
+
+    let revealed = self.reveal_joke();
+    let joke_text = self.visible_joke_text();
+    let mut lines = vec![
+      Line::from("Please confirm you are old enough to partition a disk..."),
+      Line::from(""),
+    ];
+
+    if revealed {
+      if joke_text.is_empty() {
+        for _ in 0..5 {
+          lines.push(Line::from(" "));
+        }
+      } else {
+        let mut split = joke_text.split('\n');
+
+        if let Some(first_line) = split.next() {
+          if !first_line.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+              first_line.to_string(),
+              Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )]));
+          } else {
+            lines.push(Line::from(""));
+          }
+        }
+
+        for line in split {
+          lines.push(Line::from(line.to_string()));
+        }
+      }
+    } else {
+      for _ in 0..5 {
+        lines.push(Line::from(" "));
+      }
+    }
+
+    let block = Block::default()
+      .title("Age verification")
+      .borders(Borders::ALL)
+      .border_style(Style::default().fg(Color::Yellow))
+      .style(Style::default().bg(Color::Black));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let content_chunks = Layout::default()
+      .direction(Direction::Vertical)
+      .constraints([Constraint::Min(0), Constraint::Length(3)])
+      .split(inner);
+
+    let paragraph = Paragraph::new(lines)
+      .alignment(Alignment::Center)
+      .wrap(Wrap { trim: true })
+      .style(Style::default().fg(Color::White).bg(Color::Black));
+    f.render_widget(paragraph, content_chunks[0]);
+
+    if self.joke_fully_visible() {
+      self.button_row.render(f, content_chunks[1]);
+    }
+
+    self.help_modal.render(f, area);
+  }
+
+  fn handle_input(&mut self, _installer: &mut Installer, event: KeyEvent) -> Signal {
+    match event.code {
+      KeyCode::Char('?') => {
+        self.help_modal.toggle();
+        Signal::Wait
+      }
+      KeyCode::Esc if self.help_modal.visible => {
+        self.help_modal.hide();
+        Signal::Wait
+      }
+      _ if self.help_modal.visible => Signal::Wait,
+      KeyCode::Esc => Signal::Pop,
+      KeyCode::Enter if !self.joke_fully_visible() => {
+        self.skipped_animation = true;
+        Signal::Wait
+      }
+      ui_up!() | ui_left!() => {
+        self.button_row.prev_child();
+        self.selected_button = self.selected_button.saturating_sub(1);
+        Signal::Wait
+      }
+      ui_down!() | ui_right!() => {
+        self.button_row.next_child();
+        self.selected_button = (self.selected_button + 1).min(1);
+        Signal::Wait
+      }
+      KeyCode::Enter => {
+        if self.selected_button == 0 {
+          self.start_install()
+        } else {
+          Signal::Pop
+        }
+      }
+      _ => Signal::Wait,
+    }
+  }
+}
 impl<'a> InstallProgress<'a> {
   // Invoked when no args are passed to aegis
   pub fn new(

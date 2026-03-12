@@ -1,6 +1,6 @@
 [package]
 name = "aegis"
-version = "0.3.2"
+version = "1.0.0"
 edition = "2024"
 
 [dependencies]
@@ -10,16 +10,16 @@ serde.workspace = true
 serde_json.workspace = true
 core = { path = "../core" }
 shared = { path = "../shared" }
-ansi-to-tui = "7.0.0"
-anyhow = "1.0.98"
-base64 = "0.22.1"
-flate2 = { version = "1.1.2", features = ["rust_backend"] }
-fuzzy-matcher = "0.3.7"
-rand = "0.9"
-ratatui = { version = "0.29.0", features = ["all-widgets"] }
-strip-ansi-escapes = "0.2.1"
-tempfile = "3.20.0"
-throbber-widgets-tui = "0.9.0"
+ansi-to-tui = "8"
+anyhow = "1"
+base64 = "0.22"
+flate2 = { version = "1", features = ["rust_backend"] }
+fuzzy-matcher = "0.3"
+rand = "0.10"
+ratatui = { version = "0.30", features = ["all-widgets"] }
+strip-ansi-escapes = "0.2"
+tempfile = "3"
+throbber-widgets-tui = "0.11"
 
 [[bin]]
 name = "aegis"

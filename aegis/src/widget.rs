@@ -1,4 +1,4 @@
-use rand::{prelude::IndexedRandom, Rng};
+use rand::{prelude::IndexedRandom, RngExt};
 use std::{
   collections::VecDeque,
   fs::{File, OpenOptions},

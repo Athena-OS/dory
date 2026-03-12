@@ -26,7 +26,7 @@ use ratatui::{
 };
 use std::time::{Duration, Instant};
 
-use crate::installer::{InstallProgress, Installer, Menu, Page, Signal};
+use crate::installer::{AgeVerification, Installer, Menu, Page, Signal};
 
 pub mod drives;
 pub mod installer;
@@ -240,12 +240,12 @@ fn handle_signal(
       disko_cfg.flush()?;
       debug!("Wrote disko_cfg at {}", disko_cfg.path().display());
 
-      page_stack.push(Box::new(InstallProgress::new(
+      page_stack.push(Box::new(AgeVerification::new(
         installer.clone(),
         system_cfg,
         disko_cfg,
         log_path.to_path_buf(),
-      )?));
+      )));
 
       Ok(false)
     }

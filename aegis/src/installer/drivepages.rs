@@ -974,7 +974,6 @@ pub struct ManualPartition {
 impl ManualPartition {
   pub fn new(mut disk_config: TableWidget) -> Self {
     let buttons = vec![
-      Box::new(Button::new("Suggest Partition Layout")) as Box<dyn ConfigWidget>,
       Box::new(Button::new("Confirm and Exit")) as Box<dyn ConfigWidget>,
       Box::new(Button::new("Reset Partition Layout")) as Box<dyn ConfigWidget>,
       Box::new(Button::new("Abort")) as Box<dyn ConfigWidget>,
@@ -1049,10 +1048,10 @@ impl Page for ManualPartition {
     );
     let hor_chunks = split_hor!(
       chunks[1],
-      1,
+      0,
       [
         Constraint::Percentage(33),
-        Constraint::Percentage(33),
+        Constraint::Percentage(34),
         Constraint::Percentage(33),
       ]
     );
@@ -1082,7 +1081,6 @@ impl Page for ManualPartition {
     if self.confirming_reset && event.code != KeyCode::Enter {
       self.confirming_reset = false;
       self.buttons.set_children_inplace(vec![
-        Box::new(Button::new("Suggest Partition Layout")) as Box<dyn ConfigWidget>,
         Box::new(Button::new("Confirm and Exit")) as Box<dyn ConfigWidget>,
         Box::new(Button::new("Reset Partition Layout")) as Box<dyn ConfigWidget>,
         Box::new(Button::new("Abort")) as Box<dyn ConfigWidget>,
@@ -1166,19 +1164,14 @@ impl Page for ManualPartition {
           };
           match idx {
             0 => {
-              // Suggest Partition Layout
-              Signal::Push(Box::new(SuggestPartition::new()))
-            }
-            1 => {
               // Confirm and Exit
               installer.make_drive_config_display();
               Signal::Unwind
             }
-            2 => {
+            1 => {
               if !self.confirming_reset {
                 self.confirming_reset = true;
                 let new_buttons = vec![
-                  Box::new(Button::new("Suggest Partition Layout")) as Box<dyn ConfigWidget>,
                   Box::new(Button::new("Confirm and Exit")) as Box<dyn ConfigWidget>,
                   Box::new(Button::new("Really?")) as Box<dyn ConfigWidget>,
                   Box::new(Button::new("Abort")) as Box<dyn ConfigWidget>,
@@ -1196,7 +1189,6 @@ impl Page for ManualPartition {
                 self.disk_config.focus();
                 self.confirming_reset = false;
                 self.buttons.set_children_inplace(vec![
-                  Box::new(Button::new("Suggest Partition Layout")) as Box<dyn ConfigWidget>,
                   Box::new(Button::new("Confirm and Exit")) as Box<dyn ConfigWidget>,
                   Box::new(Button::new("Reset Partition Layout")) as Box<dyn ConfigWidget>,
                   Box::new(Button::new("Abort")) as Box<dyn ConfigWidget>,
@@ -1204,7 +1196,7 @@ impl Page for ManualPartition {
                 Signal::Wait
               }
             }
-            3 => {
+            2 => {
               // Abort
               Signal::PopCount(2)
             }
@@ -1253,183 +1245,6 @@ impl Page for ManualPartition {
       vec![(None, "Use buttons at bottom for additional actions.")],
     ]);
     ("Manual Partitioning".to_string(), help_content)
-  }
-}
-
-pub struct SuggestPartition {
-  buttons: WidgetBox,
-  help_modal: HelpModal<'static>,
-}
-
-impl SuggestPartition {
-  pub fn new() -> Self {
-    let buttons = vec![
-      Box::new(Button::new("Yes")) as Box<dyn ConfigWidget>,
-      Box::new(Button::new("No")) as Box<dyn ConfigWidget>,
-    ];
-    let mut button_row = WidgetBox::button_menu(buttons);
-    button_row.focus();
-    let help_content = styled_block(vec![
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"),
-        (None, " - Navigate yes/no options"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
-        (None, " - Confirm selection"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
-        (None, " - Cancel and return"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
-        (None, " - Show this help"),
-      ],
-      vec![(None, "")],
-      vec![(None, "Confirm whether to use a suggested partition layout.")],
-      vec![(
-        None,
-        "This will create a standard boot and root partition setup.",
-      )],
-      vec![
-        (Some((Color::Red, Modifier::BOLD)), "WARNING: "),
-        (None, "All existing data will be erased!"),
-      ],
-    ]);
-    let help_modal = HelpModal::new("Suggest Partition Layout", help_content);
-    Self {
-      buttons: button_row,
-      help_modal,
-    }
-  }
-}
-
-impl Default for SuggestPartition {
-  fn default() -> Self {
-    Self::new()
-  }
-}
-
-impl Page for SuggestPartition {
-  fn render(&mut self, _installer: &mut Installer, f: &mut Frame, area: Rect) {
-    let chunks = split_vert!(
-      area,
-      1,
-      [Constraint::Percentage(70), Constraint::Percentage(30)]
-    );
-
-    let info_box = InfoBox::new(
-      "Suggest Partition Layout",
-      styled_block(vec![
-        vec![
-          (None, "Would you like to use a "),
-          (HIGHLIGHT, "suggested partition layout "),
-          (None, "for your selected drive?"),
-        ],
-        vec![
-          (None, "This will create a standard layout with a "),
-          (HIGHLIGHT, "boot partition "),
-          (None, "and a "),
-          (HIGHLIGHT, "root partition."),
-        ],
-        vec![
-          (
-            None,
-            "Any existing manual configuration will be overwritten, and when the installer is run, ",
-          ),
-          (
-            Some((Color::Red, Modifier::ITALIC | Modifier::BOLD)),
-            "all existing data on the drive will be erased.",
-          ),
-        ],
-        vec![(None, "")],
-        vec![(None, "Do you wish to proceed?")],
-      ]),
-    );
-    info_box.render(f, chunks[0]);
-    self.buttons.render(f, chunks[1]);
-
-    // Render help modal on top
-    self.help_modal.render(f, area);
-  }
-  fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
-    match event.code {
-      KeyCode::Char('?') => {
-        self.help_modal.toggle();
-        Signal::Wait
-      }
-      ui_close!() if self.help_modal.visible => {
-        self.help_modal.hide();
-        Signal::Wait
-      }
-      _ if self.help_modal.visible => Signal::Wait,
-      ui_back!() => Signal::Pop,
-      ui_up!() => {
-        self.buttons.prev_child();
-        Signal::Wait
-      }
-      ui_down!() => {
-        self.buttons.next_child();
-        Signal::Wait
-      }
-      KeyCode::Enter => {
-        let Some(idx) = self.buttons.selected_child() else {
-          return Signal::Wait;
-        };
-        match idx {
-          0 => {
-            // Yes
-            if let Some(ref mut config) = installer.drive_config {
-              config.use_default_layout(Some("ext4".into()));
-            } else {
-              return Signal::Error(anyhow::anyhow!(
-                "No drive config available for suggested partition layout"
-              ));
-            }
-            Signal::Pop
-          }
-          1 => {
-            // No
-            Signal::Pop
-          }
-          _ => Signal::Wait,
-        }
-      }
-      _ => Signal::Wait,
-    }
-  }
-
-  fn get_help_content(&self) -> (String, Vec<ratatui::text::Line<'_>>) {
-    let help_content = styled_block(vec![
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"),
-        (None, " - Navigate yes/no options"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
-        (None, " - Confirm selection"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
-        (None, " - Cancel and return"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
-        (None, " - Show this help"),
-      ],
-      vec![(None, "")],
-      vec![(None, "Confirm whether to use a suggested partition layout.")],
-      vec![(
-        None,
-        "This will create a standard boot and root partition setup.",
-      )],
-      vec![
-        (Some((Color::Red, Modifier::BOLD)), "WARNING: "),
-        (None, "All existing data will be erased!"),
-      ],
-    ]);
-    ("Suggest Partition Layout".to_string(), help_content)
   }
 }
 
