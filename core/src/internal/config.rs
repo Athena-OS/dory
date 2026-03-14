@@ -296,10 +296,6 @@ pub fn install_config(inputs: &[ConfigInput], log_path: String) -> i32 {
     info!("Extra packages : {:?}", config.extra_packages);
     package_set.extend(config.extra_packages.clone());
     /**************************/
-    /*          MISC         */
-    info!("Selecting zramd.");
-    package_set.push("zram-generator".into());
-    /**************************/
     /*         USERS         */
     for user in &config.users {
         let shell = match user.shell.trim().to_lowercase().as_str() {
@@ -382,10 +378,6 @@ pub fn install_config(inputs: &[ConfigInput], log_path: String) -> i32 {
             "zsh" => shells::configure_zsh(),
             _ => info!("No shell configuration needed."),
         }
-        /**************************/
-        /*          MISC         */
-        info!("Enabling zramd.");
-        base::configure_zram();
     }
 
     /* DISPLAY MANAGER CONFIG */

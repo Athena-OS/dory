@@ -10,7 +10,7 @@ pub const COMMON: &[&str] = &[
     "lolcat", "lsd", "nano-syntax-highlighting", "nautilus", "ncdu", "onionshare", "openvpn",
     "orca", "p7zip", "podman", "polkit", "sl", "torbrowser-launcher", "tree",
     "unzip", "usbguard", "vim", "vnstat", "which", "xclip", "xmlstarlet", "zoxide",
-    "athena-bash", "athena-config", "athena-kitty-config", "athena-nexus",
+    "athena-bash", "athena-kitty-config", "athena-nexus", "athena-settings",
     "athena-tmux-config", "athena-tweak-tool", "athena-vscodium-themes", "athena-welcome",
     "htb-toolkit", "nist-feed",
 ];

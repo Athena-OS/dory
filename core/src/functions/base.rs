@@ -900,14 +900,6 @@ fn detect_root_fs_info() -> (String, String) {
     (fstype, uuid)
 }
 
-pub fn configure_zram() {
-    files::create_file("/mnt/etc/systemd/zram-generator.conf");
-    files_eval(
-        files::append_file("/mnt/etc/systemd/zram-generator.conf", "[zram0]\nzram-size = ram / 2\ncompression-algorithm = zstd\nswap-priority = 100\nfs-type = swap"),
-        "Write zram-generator config",
-    );
-}
-
 fn secure_boot_supported() -> bool {
     // If we’re not on a UEFI system (or efivarfs isn’t exposed), SB is effectively “unsupported”.
     if !Path::new("/sys/firmware/efi").exists() {
