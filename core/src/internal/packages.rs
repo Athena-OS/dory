@@ -1,7 +1,7 @@
 pub const COMMON: &[&str] = &[
     "linux-firmware", "network-manager-applet", "man-db", "man-pages", "nano", "sudo", "curl",
     "accountsservice", "alacritty", "alsa-utils", "apparmor", "audit", "bind", "bluez", "dhcpcd",
-    "dialog", "dosfstools", "firejail", "irqbalance", "lvm2", "memtest86+", "most", "mtools", "nbd",
+    "dialog", "docker", "dosfstools", "firejail", "irqbalance", "lvm2", "memtest86+", "most", "mtools", "nbd",
     "net-tools", "nfs-utils", "nss-mdns", "ntfsprogs", "pavucontrol", "pv", "rsync", "squashfs-tools",
     "testdisk", "usbutils", "wpa_supplicant", "xfsprogs",
     "pipewire", "pipewire-alsa", "wireplumber", "ntfs-3g", "zram-generator",
@@ -21,7 +21,7 @@ pub const ARCH_ONLY: &[&str] = &[
     "netctl","ntp","profile-sync-daemon","sof-firmware","wireless_tools",
     "pipewire-pulse","pipewire-jack","ananicy","bashtop","imagemagick","lib32-glibc","mtpfs",
     "networkmanager-openvpn","noto-fonts-cjk", "octopi","openbsd-netcat","paru","reflector",
-    "toilet-fonts","wget","athena-cyber-hub","athena-firefox-config","athena-powershell-config",
+    "toilet-fonts","wget","athena-firefox-config","athena-powershell-config",
     "athena-vim-config","kando-bin","cai"
 ];
 

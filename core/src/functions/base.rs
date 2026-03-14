@@ -963,6 +963,7 @@ pub fn enable_system_services() {
     enable_service("apparmor");
     enable_service("auditd");
     enable_service("bluetooth");
+    enable_service("docker");
     enable_service("irqbalance");
     enable_service("NetworkManager");
     enable_service("podman");

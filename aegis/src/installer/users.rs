@@ -559,6 +559,7 @@ impl AddUser {
 
         // groups
         let mut groups = vec![];
+        groups.push("docker".to_string());
         if sudo_allowed {
             groups.push("wheel".to_string());
         }
