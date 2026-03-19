@@ -146,7 +146,7 @@ impl Installer {
   pub fn to_json(&mut self) -> anyhow::Result<Value> {
     // Create the installer configuration JSON
     // This is used as an intermediate representation before being serialized into
-    // Aegis backend
+    // Dory backend
     let sys_config = json!({
       "base": self.basesystem,
       "hostname": self.hostname,
@@ -4803,7 +4803,7 @@ impl<'a> Page for AgeVerification<'a> {
   }
 }
 impl<'a> InstallProgress<'a> {
-  // Invoked when no args are passed to aegis
+  // Invoked when no args are passed to dory
   pub fn new(
       installer: Installer,
       system_cfg: NamedTempFile,
@@ -4889,7 +4889,7 @@ impl<'a> InstallProgress<'a> {
       let mut log_box = LogBox::new("Logs".into());
       OpenOptions::new()
           .create(true)
-          .write(true)  // Each time I start a new install, it makes the aegis.log file empty
+          .write(true)  // Each time I start a new install, it makes the dory.log file empty
           .truncate(true)      // one-time clean slate
           .open(&log_path)?;
       log_box.open_log(log_path.clone())?;
@@ -4930,7 +4930,7 @@ impl<'a> InstallProgress<'a> {
         "sh",
         "-c",
         format!(
-          "stdbuf -oL -eL -- aegis --system-file '{}' --drives-file '{}' >> '{}' 2>&1",
+          "stdbuf -oL -eL -- dory --system-file '{}' --drives-file '{}' >> '{}' 2>&1",
           system_cfg_path,
           disk_cfg_path,
           log_file_path
@@ -5221,7 +5221,7 @@ impl InstallFailed {
 
 impl Default for InstallFailed {
     fn default() -> Self {
-        Self::new(PathBuf::from("/tmp/aegis.log"))
+        Self::new(PathBuf::from("/tmp/dory.log"))
     }
 }
 

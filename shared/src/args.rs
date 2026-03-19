@@ -22,7 +22,7 @@ impl ExtendIntoString for Vec<String> {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "aegis-installer")]
+#[command(name = "dory")]
 #[command(author=env!("CARGO_PKG_AUTHORS"))]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = env!("CARGO_PKG_DESCRIPTION"), long_about = None)]
@@ -30,19 +30,19 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Use an existing system config JSON file (TUI will pass this to aegis-core)
+    /// Use an existing system config JSON file (TUI will pass this to dory-core)
     #[arg(long = "system-file", short = 's')]
     pub system_file: Option<std::path::PathBuf>,
 
-    /// Use an existing drives/partition JSON file (TUI will pass this to aegis-core)
+    /// Use an existing drives/partition JSON file (TUI will pass this to dory-core)
     #[arg(long = "drives-file", short = 'd')]
     pub drives_file: Option<std::path::PathBuf>,
 
-    /// Additional JSON fragments to merge (forwarded to aegis-core or used to build temps)
+    /// Additional JSON fragments to merge (forwarded to dory-core or used to build temps)
     #[arg(long = "json", short = 'j', value_name = "JSON")]
     pub json: Vec<String>,
 
-    /// Dry-run: validate only; do not install (TUI forwards this to aegis-core)
+    /// Dry-run: validate only; do not install (TUI forwards this to dory-core)
     #[arg(long = "dry", short = 'n', visible_alias = "dry-run")]
     pub dry: bool,
 }

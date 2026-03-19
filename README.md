@@ -1,4 +1,4 @@
-<h1 align="center">Aegis</h1>
+<h1 align="center">Dory</h1>
 <h6 align="center">
   A modern terminal-based Athena OS installer, inspired by
   <a href="https://github.com/km-clay/nixos-wizard">nixos-wizard</a>.
@@ -25,12 +25,12 @@
 
 ## Getting Started
 
-### Running Aegis
+### Running Dory
 
 If running inside the included installer ISO:
 
 ```bash
-sudo aegis
+sudo dory
 ```
 
 ## Roadmap

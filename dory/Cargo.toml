@@ -1,5 +1,5 @@
 [package]
-name = "aegis"
+name = "dory"
 version = "1.0.0"
 edition = "2024"
 
@@ -22,5 +22,5 @@ tempfile = "3"
 throbber-widgets-tui = "0.11"
 
 [[bin]]
-name = "aegis"
+name = "dory"
 path = "src/main.rs"

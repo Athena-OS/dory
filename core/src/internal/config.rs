@@ -440,9 +440,9 @@ pub fn install_config(inputs: &[ConfigInput], log_path: String) -> i32 {
     /**************************/
     files::copy_multiple_files("/etc/NetworkManager/system-connections/*", "/mnt/etc/NetworkManager/system-connections/");
 
-    info!("Installation log file copied to /var/log/aegis.log");
+    info!("Installation log file copied to /var/log/dory.log");
     files_eval(files::create_directory("/mnt/var/log"), "Create /mnt/var/log");
-    files::copy_file(&log_path, "/mnt/var/log/aegis.log");
+    files::copy_file(&log_path, "/mnt/var/log/dory.log");
 
     partition::umount("/mnt"); // Recursive umount
 

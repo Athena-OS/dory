@@ -89,7 +89,7 @@ impl Drop for RawModeGuard {
 fn main() -> anyhow::Result<()> {
   if env::args().any(|arg| arg == "--version") {
     let version = env!("CARGO_PKG_VERSION");
-    println!("aegis-tui version {version}");
+    println!("dory version {version}");
     return Ok(());
   }
 
@@ -116,7 +116,7 @@ fn main() -> anyhow::Result<()> {
   }));
 
   let cli = Cli::parse();
-  let log_path = "/tmp/aegis.log".to_owned();
+  let log_path = "/tmp/dory.log".to_owned();
 
   logging::init(cli.verbose, &log_path);
   debug!("Logger initialized. Verbose: {}", cli.verbose);

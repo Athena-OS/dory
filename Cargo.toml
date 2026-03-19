@@ -1,7 +1,7 @@
 [workspace]
 
 members = [
-    "aegis",
+    "dory",
     "core",
     "shared",
 ]
