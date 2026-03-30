@@ -12,8 +12,8 @@ use std::{fs, path::{Path, PathBuf}};
 
 pub fn install_packages(mut packages: Vec<String>, kernel: &str) -> i32 {
     let kernels = vec![
-        kernel.to_string(),              // the user-selected kernel (e.g. "linux-lts")
-        "linux-hardened".to_string(),    // always install hardened too
+        kernel.to_string(),              // the user-selected kernel (e.g. "linux-aegis-offensive")
+        "linux-aegis-hardened".to_string(),    // always install hardened too
     ];
     let kernel_headers: Vec<String> =
         kernels.iter().map(|k| format!("{}-headers", k)).collect();
@@ -50,7 +50,7 @@ pub fn install_packages(mut packages: Vec<String>, kernel: &str) -> i32 {
 
     let (virt_packages, virt_services, virt_params) = hardware::virt_check();
     let cpu_packages = hardware::cpu_check();
-    let gpu_packages = hardware::gpu_check(kernel); // linux-lts
+    let gpu_packages = hardware::gpu_check(kernel); // linux-aegis-offensive
     packages.extend_into(virt_packages);
     packages.extend_into(cpu_packages);
     packages.extend_into(gpu_packages);
@@ -314,7 +314,7 @@ fn ensure_pcr_keys_in_chroot() {
 /// Build and sign a Unified Kernel Image (UKI) for one kernel flavor
 /// using Arch's ukify syntax.
 ///
-/// kname: "linux-lts" or "linux-hardened"
+/// kname: "linux-aegis-offensive" or "linux-aegis-hardened"
 /// pretty: "LTS" or "Hardened" (for boot menu entry title)
 /// esp_str: ESP mount path *inside chroot* (usually "/efi")
 /// secureboot_key_dir: path *inside chroot* to the key dir ("/etc/secureboot/keys")
@@ -611,21 +611,21 @@ pub fn configure_bootloader_systemd_boot_shim(espdir: PathBuf) {
     );
     */
     build_and_sign_uki(
-        "linux-lts",
-        "LTS",
+        "linux-aegis-offensive",
+        "Offensive",
         esp_str,
         if sb_supported { Some(secureboot_key_dir) } else { None },
         &cmdline,
     );
     build_and_sign_uki(
-        "linux-hardened",
+        "linux-aegis-hardened",
         "Hardened",
         esp_str,
         if sb_supported { Some(secureboot_key_dir) } else { None },
         &cmdline,
     );
 
-    // 8. Write loader.conf, pick linux-lts as default
+    // 8. Write loader.conf, pick linux-aegis-offensive as default
     let loader_dir = format!("/mnt{esp_str}/loader");
     let entries_dir = format!("{loader_dir}/entries");
     fs::create_dir_all(&entries_dir).expect("Failed to create loader/entries dir");
@@ -634,7 +634,7 @@ pub fn configure_bootloader_systemd_boot_shim(espdir: PathBuf) {
     files_eval(
         files::append_file(
             &format!("{loader_dir}/loader.conf"),
-            "default athena-linux-lts.conf\ntimeout 3\nconsole-mode keep\neditor no\n",
+            "default athena-linux-aegis-offensive.conf\ntimeout 3\nconsole-mode keep\neditor no\n",
         ),
         "Write loader.conf",
     );
