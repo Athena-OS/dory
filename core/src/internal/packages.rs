@@ -1,7 +1,7 @@
 pub const COMMON: &[&str] = &[
     "linux-firmware", "network-manager-applet", "man-db", "man-pages", "nano", "sudo", "curl",
     "accountsservice", "alacritty", "alsa-utils", "apparmor", "audit", "bind", "bluez", "dhcpcd",
-    "dialog", "docker", "dosfstools", "firejail", "irqbalance", "lvm2", "memtest86+", "most", "mtools", "nbd",
+    "dialog", "docker", "dosfstools", "firejail", "irqbalance", "lvm2", "memtest86+", "most", "nbd",
     "net-tools", "nfs-utils", "nss-mdns", "ntfsprogs", "pavucontrol", "pv", "rsync", "scx-scheds", "scx-tools",
     "squashfs-tools", "testdisk", "usbutils", "wpa_supplicant", "xfsprogs",
     "pipewire", "pipewire-alsa", "wireplumber", "ntfs-3g", "zram-generator",
@@ -18,7 +18,7 @@ pub const COMMON: &[&str] = &[
 pub const ARCH_ONLY: &[&str] = &[
     "systemd-sysvcompat","networkmanager","arch-install-scripts","edk2-shell",
     "inetutils", "iptables-nft", "mesa","mesa-utils","mkinitcpio-nfs-utils","mkinitcpio-openswap",
-    "netctl","ntp","profile-sync-daemon","sof-firmware","wireless_tools",
+    "netctl","profile-sync-daemon","sof-firmware","wireless_tools",
     "pipewire-pulse","pipewire-jack","ananicy","bashtop","imagemagick","lib32-glibc","mtpfs",
     "networkmanager-openvpn","noto-fonts-cjk", "octopi","openbsd-netcat","paru","reflector",
     "toilet-fonts","wget","athena-firefox-config","athena-powershell-config",
