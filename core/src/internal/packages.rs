@@ -16,7 +16,7 @@ pub const COMMON: &[&str] = &[
 ];
 
 pub const ARCH_ONLY: &[&str] = &[
-    "systemd-sysvcompat","networkmanager","arch-install-scripts","broadcom-wl-dkms","edk2-shell",
+    "systemd-sysvcompat","networkmanager","arch-install-scripts","edk2-shell",
     "inetutils", "iptables-nft", "mesa","mesa-utils","mkinitcpio-nfs-utils","mkinitcpio-openswap",
     "netctl","ntp","profile-sync-daemon","sof-firmware","wireless_tools",
     "pipewire-pulse","pipewire-jack","ananicy","bashtop","imagemagick","lib32-glibc","mtpfs",
