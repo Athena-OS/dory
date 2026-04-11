@@ -290,7 +290,6 @@ fn install_onyx() -> Vec<&'static str> {
 pub fn configure_gnome() {
     if is_arch() {
         disable_wsession("gnome-classic.desktop");
-        disable_wsession("gnome-classic-wayland.desktop");
         disable_wsession("gnome-wayland.desktop");
     }
 }
