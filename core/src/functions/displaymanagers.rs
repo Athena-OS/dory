@@ -103,8 +103,6 @@ pub fn configure_gdm(desktop: &str) {
         files::rename_file("/mnt/usr/lib/udev/rules.d/61-gdm.rules", "/mnt/usr/lib/udev/rules.d/61-gdm.rules.bak");
         if is_arch() {
             desktops::disable_wsession("gnome-classic.desktop");
-            desktops::disable_wsession("gnome-classic-wayland.desktop");
-            desktops::disable_wsession("gnome-wayland.desktop");
         }
     }
     enable_service("gdm"); 
