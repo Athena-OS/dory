@@ -140,11 +140,16 @@ fn main() -> anyhow::Result<()> {
       }; // <- raw_guard drops here; terminal restored
       if let Some(id) = selected {
         let km = set_keyboard_live(&id).map_err(|e| anyhow::anyhow!("{e}"))?;
-        println!("Keyboard layout set to: {} ({})", km.label, km.console);
+        // Mirror the `motd` alias: clear the screen, then render /etc/issue
+        // with its escape sequences interpreted. The `if let Ok(...)` plays
+        // the same role as `[ -r /etc/issue ]` in the alias -- silently skip
+        // if the file is missing or unreadable.
+        print!("\x1b[2J\x1b[H");
         if let Ok(contents) = std::fs::read_to_string("/etc/issue") {
-          println!();
           print!("{}", contents.replace(r"\e", "\x1b"));
         }
+        println!();
+        println!("Keyboard layout set to: {} ({})", km.label, km.console);
       } else {
         println!("No keyboard layout selected.");
       }
