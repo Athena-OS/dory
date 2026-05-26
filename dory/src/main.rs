@@ -1,7 +1,10 @@
 use std::{env, io, path::{Path, PathBuf}};
 
 use clap::Parser;
-use core::internal::config::{install_config, read_config};
+use core::{
+  internal::config::{install_config, read_config},
+  functions::locale::set_keyboard_live,
+};
 use log::{debug, info, warn};
 use shared::{
   args::{Cli, ConfigInput},
@@ -26,7 +29,7 @@ use ratatui::{
 };
 use std::time::{Duration, Instant};
 
-use crate::installer::{AgeVerification, Installer, Menu, Page, Signal};
+use crate::installer::{AgeVerification, Installer, KeyboardLayout, Menu, Page, Signal};
 
 pub mod drives;
 pub mod installer;
@@ -120,6 +123,36 @@ fn main() -> anyhow::Result<()> {
 
   logging::init(cli.verbose, &log_path);
   debug!("Logger initialized. Verbose: {}", cli.verbose);
+
+  // --- Live-environment keymap mode -----------------------------------------
+  // `--set-keymap`       -> launch the TUI picker, apply on exit
+  // `--set-keymap=<id>`  -> apply directly without UI
+  if let Some(value) = cli.set_keymap.as_deref() {
+    if value.is_empty() {
+      // Interactive: spin up the same TUI runtime, but with KeyboardLayout
+      // as the only page. We collect the choice inside the TUI scope, drop
+      // the raw-mode guard so the terminal is fully restored, THEN apply +
+      // print on the real screen (otherwise println! lands on the alt-screen
+      // and is wiped on exit).
+      let mut stdout = io::stdout();
+      let selected: Option<String> = {
+        let _raw_guard = RawModeGuard::new(&mut stdout)?;
+        let backend = CrosstermBackend::new(stdout);
+        let mut terminal = Terminal::new(backend)?;
+        run_keymap_picker(&mut terminal)?
+      }; // <- raw_guard drops here; terminal restored
+      if let Some(id) = selected {
+        let km = set_keyboard_live(&id).map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("Keyboard layout set to: {} ({})", km.label, km.console);
+      } else {
+        println!("No keyboard layout selected.");
+      }
+      return Ok(());
+    }
+    let km = set_keyboard_live(value).map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!("Keyboard layout set to: {} ({})", km.label, km.console);
+    return Ok(());
+  }
 
   let mut sources: Vec<ConfigInput> = Vec::new();
   sources.extend(cli.system_file.iter().cloned().map(ConfigInput::File));
@@ -350,4 +383,77 @@ pub fn run_app(
   }
 
   Ok(())
+}
+
+/// Standalone TUI loop for the `--set-keymap` flag.
+///
+/// Mirrors `run_app` but pushes `KeyboardLayout` as the only page. When the
+/// page signals `Pop` (Enter pressed on a layout) or `Quit`, we exit the loop
+/// and return the chosen keymap ID -- the caller in `main` is responsible for
+/// applying it after the TUI guard has dropped, so the success message lands
+/// on the real terminal instead of the alt-screen.
+///
+/// `Installer` is still constructed because `KeyboardLayout::handle_input`
+/// writes the selection into `installer.keyboard_layout` -- this is what
+/// guarantees zero behavioural drift between this entry point and the normal
+/// install flow.
+pub fn run_keymap_picker(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+) -> anyhow::Result<Option<String>> {
+  let mut installer = Installer::new();
+  let mut page: Box<dyn Page> = Box::new(KeyboardLayout::new());
+
+  let tick_rate = Duration::from_millis(100);
+  let mut last_tick = Instant::now();
+  let mut user_confirmed = false;
+
+  loop {
+    terminal.draw(|f| {
+      let chunks = split_vert!(
+        f.area(), 0,
+        [
+          Constraint::Length(1),
+          Constraint::Min(0),
+        ]
+      );
+      let header_chunks = split_hor!(
+        chunks[0], 0,
+        [
+          Constraint::Percentage(33),
+          Constraint::Percentage(34),
+          Constraint::Percentage(33),
+        ]
+      );
+      let help_text = Paragraph::new("Press '?' for help")
+        .style(Style::default().fg(Color::Gray))
+        .alignment(Alignment::Center);
+      f.render_widget(help_text, header_chunks[0]);
+      let title = Paragraph::new("Athena OS - Set Keyboard Layout")
+        .style(Style::default().add_modifier(Modifier::BOLD))
+        .alignment(Alignment::Center);
+      f.render_widget(title, header_chunks[1]);
+
+      page.render(&mut installer, f, chunks[1]);
+    })?;
+
+    let timeout = tick_rate
+      .checked_sub(last_tick.elapsed())
+      .unwrap_or_else(|| Duration::from_secs(0));
+
+    if event::poll(timeout)?
+      && let Event::Key(key) = event::read()? {
+        match page.handle_input(&mut installer, key) {
+          Signal::Pop => { user_confirmed = true; break; }   // Enter on a layout
+          Signal::Quit | Signal::Unwind => break,            // user cancelled
+          Signal::Error(err) => return Err(anyhow::anyhow!("{err}")),
+          _ => {} // Wait / Push (e.g. help modal) / etc.: keep looping
+        }
+      }
+
+    if last_tick.elapsed() >= tick_rate {
+      last_tick = Instant::now();
+    }
+  }
+
+  Ok(if user_confirmed { installer.keyboard_layout } else { None })
 }

@@ -45,6 +45,15 @@ pub struct Cli {
     /// Dry-run: validate only; do not install (TUI forwards this to dory-core)
     #[arg(long = "dry", short = 'n', visible_alias = "dry-run")]
     pub dry: bool,
+
+    /// Set the keyboard layout for the current live environment and exit.
+    ///
+    /// With no value (`--set-keymap`), launches the interactive TUI selector.
+    /// With a value (`--set-keymap=de`), applies the layout immediately and
+    /// exits without entering the installer TUI.
+    #[arg(long = "set-keymap", value_name = "KEYMAP",
+          num_args = 0..=1, default_missing_value = "")]
+    pub set_keymap: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]

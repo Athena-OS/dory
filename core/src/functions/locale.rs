@@ -1,5 +1,5 @@
 use shared::args::{ExecMode, OnFail, is_nix};
-use shared::exec::exec;
+use shared::exec::{exec, exec_output};
 use shared::files;
 use shared::keyboard;
 use shared::returncode_eval::exec_eval;
@@ -156,4 +156,51 @@ EndSection
     }
 
     Ok(())
+}
+/// Apply a keymap to the currently running live environment.
+///
+/// Unlike `set_keyboard`, which targets the install root at `/mnt`, this
+/// function configures the *running* system. It performs three actions:
+///   1. Runs `loadkeys` so the change takes effect on the current TTY
+///      immediately.
+///   2. Writes `/etc/vconsole.conf` so new shells and TTYs spawned in this
+///      live session inherit the setting.
+///   3. Best-effort: invokes `setxkbmap` if an X11 session happens to be
+///      attached (silently ignored if not present or not running under X).
+///
+/// Returns the resolved Keymap so callers can confirm what was applied
+/// (useful for the non-interactive CLI path's success message).
+pub fn set_keyboard_live(
+    user_choice_or_id: &str,
+) -> Result<&'static keyboard::Keymap, Box<dyn std::error::Error + Send + Sync>> {
+    let km = keyboard::resolve(user_choice_or_id)
+        .unwrap_or_else(|| keyboard::BY_ID["us"]);
+
+    // 1. Apply to current console session immediately
+    exec_eval(
+        exec(
+            ExecMode::Direct,
+            "loadkeys",
+            vec![km.console.to_string()],
+            OnFail::Continue,
+        ),
+        &format!("Apply keymap {} to current TTY", km.console),
+    );
+
+    // 2. Persist for new shells/TTYs in this live session.
+    //    Overwrite rather than append so re-runs do not accumulate stale lines.
+    std::fs::write(
+        "/etc/vconsole.conf",
+        format!("KEYMAP={}\nFONT=ter-u24n\n", km.console),
+    )?;
+
+    // 3. Best-effort X11 update (no-op outside a graphical session).
+    let mut xkb_args = vec![km.xkb_layout.to_string()];
+    if let Some(variant) = km.xkb_variant {
+        xkb_args.push("-variant".to_string());
+        xkb_args.push(variant.to_string());
+    }
+    let _ = exec_output("setxkbmap", xkb_args);
+
+    Ok(km)
 }
