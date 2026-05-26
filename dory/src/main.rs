@@ -141,6 +141,10 @@ fn main() -> anyhow::Result<()> {
       if let Some(id) = selected {
         let km = set_keyboard_live(&id).map_err(|e| anyhow::anyhow!("{e}"))?;
         println!("Keyboard layout set to: {} ({})", km.label, km.console);
+        if let Ok(contents) = std::fs::read_to_string("/etc/issue") {
+          println!();
+          print!("{}", contents.replace(r"\e", "\x1b"));
+        }
       } else {
         println!("No keyboard layout selected.");
       }
