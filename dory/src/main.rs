@@ -96,7 +96,6 @@ fn main() -> anyhow::Result<()> {
     return Ok(());
   }
 
-  check_if_root();
   // Set up panic handler to gracefully restore terminal state
   // This prevents leaving the user's terminal in an unusable state
   // if the installer crashes unexpectedly
@@ -121,13 +120,11 @@ fn main() -> anyhow::Result<()> {
   let cli = Cli::parse();
   let log_path = "/tmp/dory.log".to_owned();
 
-  logging::init(cli.verbose, &log_path);
-  debug!("Logger initialized. Verbose: {}", cli.verbose);
-
   // --- Live-environment keymap mode -----------------------------------------
   // `--set-keymap`       -> launch the TUI picker, apply on exit
   // `--set-keymap=<id>`  -> apply directly without UI
   if let Some(value) = cli.set_keymap.as_deref() {
+    check_if_root();
     if value.is_empty() {
       // Interactive: spin up the same TUI runtime, but with KeyboardLayout
       // as the only page. We collect the choice inside the TUI scope, drop
@@ -158,6 +155,10 @@ fn main() -> anyhow::Result<()> {
   sources.extend(cli.system_file.iter().cloned().map(ConfigInput::File));
   sources.extend(cli.drives_file.iter().cloned().map(ConfigInput::File));
   
+  check_if_root(); // check_if_root must be before logging::init otherwise it does not spawn the sudo need error msg
+  logging::init(cli.verbose, &log_path);
+  debug!("Logger initialized. Verbose: {}", cli.verbose);
+
   if !sources.is_empty() {
       if cli.dry {
           let _cfg = read_config(&sources);
@@ -175,7 +176,7 @@ fn main() -> anyhow::Result<()> {
       return Ok(()); // <-- important: don't fall through to TUI
   }
   
-  // TUI path: no inputs provided
+  // TUI path: no config files provided, launch the interactive installer
   let mut stdout = io::stdout();
   let res = {
     let _raw_guard = RawModeGuard::new(&mut stdout)?;

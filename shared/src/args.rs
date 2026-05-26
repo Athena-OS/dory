@@ -27,6 +27,8 @@ impl ExtendIntoString for Vec<String> {
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = env!("CARGO_PKG_DESCRIPTION"), long_about = None)]
 pub struct Cli {
+    /// Increase log verbosity. Pass multiple times for more detail
+    /// (`-v` info, `-vv` debug, `-vvv` trace). Logs are written to /tmp/dory.log.
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
