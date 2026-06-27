@@ -208,7 +208,7 @@ pub fn cpu_check() -> Vec<&'static str> {
                     "cpu.intel.updateMicrocode =.*",
                     "cpu.intel.updateMicrocode = true;",
                 ),
-                "Enable intel ucode",
+                "Enable Intel ucode",
             );            
         }
     } else if cpu.contains("AMD") {
@@ -223,7 +223,7 @@ pub fn cpu_check() -> Vec<&'static str> {
                     "cpu.intel.updateMicrocode =.*",
                     "cpu.amd.updateMicrocode = true;",
                 ),
-                "Enable amd ucode",
+                "Enable AMD ucode",
             );            
         }
     }
@@ -255,6 +255,53 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
     // NVIDIA
     if gpudetect.contains("NVIDIA") {
         info!("NVIDIA GPU detected.");
+
+        if is_nix() {
+            let graphics_nix = "/mnt/etc/nixos/modules/hardware/graphics/default.nix";
+ 
+            files_eval(
+                files::sed_file(
+                    graphics_nix,
+                    "modesetting.enable =.*",
+                    "modesetting.enable = true;",
+                ),
+                "Enable NVIDIA modesetting",
+            );
+            files_eval(
+                files::sed_file(
+                    graphics_nix,
+                    "powerManagement.enable =.*",
+                    "powerManagement.enable = true;",
+                ),
+                "Enable NVIDIA power management",
+            );
+            files_eval(
+                files::sed_file(
+                    graphics_nix,
+                    "nvidiaSettings =.*",
+                    "nvidiaSettings = true;",
+                ),
+                "Enable nvidia-settings menu",
+            );
+            files_eval(
+                files::sed_file(
+                    graphics_nix,
+                    r"#\s*package = config\.boot\.kernelPackages\.nvidiaPackages\.stable;",
+                    "package = config.boot.kernelPackages.nvidiaPackages.stable;",
+                ),
+                "Uncomment NVIDIA driver package",
+            );
+            files_eval(
+                files::sed_file(
+                    graphics_nix,
+                    r#"#\s*services\.xserver\.videoDrivers = \[ "modesetting" "nvidia" \];"#,
+                    r#"services.xserver.videoDrivers = [ "modesetting" "nvidia" ];"#,
+                ),
+                "Uncomment NVIDIA video drivers",
+            );
+ 
+            return packages;
+        }
     
         // Family-specific handling
         let mut matched_family = false;
