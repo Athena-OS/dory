@@ -3,7 +3,7 @@ use crate::internal::install::install;
 use crate::internal::services::enable_service;
 use efivar::{self, efi, system};
 use log::{info, error};
-use shared::args::{ExecMode, ExtendIntoString, OnFail, PackageManager, is_arch};
+use shared::args::{ExecMode, ExtendIntoString, OnFail, PackageManager};
 use shared::exec::{exec, exec_output};
 use shared::encrypt::{find_target_root_luks, tpm2_available_esapi};
 use shared::files;
@@ -55,10 +55,9 @@ pub fn install_packages(mut packages: Vec<String>, kernel: &str) -> i32 {
     packages.extend_into(cpu_packages);
     packages.extend_into(gpu_packages);
 
-    if is_arch() {
-        init_keyrings_mirrors(); // Need to initialize keyrings before installing base package group otherwise get keyring errors. It uses rate-mirrors for Arch and Chaotic AUR on the host
-        files::copy_file("/etc/pacman.conf", "/mnt/etc/pacman.conf"); // It must be done before installing any Athena and Chaotic AUR package
-    }
+
+    init_keyrings_mirrors(); // Need to initialize keyrings before installing base package group otherwise get keyring errors. It uses rate-mirrors for Arch and Chaotic AUR on the host
+    files::copy_file("/etc/pacman.conf", "/mnt/etc/pacman.conf"); // It must be done before installing any Athena and Chaotic AUR package
 
     let code = install(
         PackageManager::Pacstrap,
@@ -865,6 +864,7 @@ pub fn install_nix_config(device: &str) {
         "Set bootloader device",
     ); 
     hardware::cpu_check();
+    hardware::gpu_check_nix();
     hardware::virt_check();
 }
 

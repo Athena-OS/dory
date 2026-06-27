@@ -230,32 +230,15 @@ pub fn cpu_check() -> Vec<&'static str> {
     packages
 }
 
-pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
-    let mut packages: Vec<&'static str> = Vec::new();
-
-    // -------- GPU --------
+pub fn gpu_check_nix() {
     let gpudetect_output = exec_eval_result(
         exec_output("lspci", vec![String::from("-k")]),
         "Detect the GPU",
     );
     let gpudetect = String::from_utf8_lossy(&gpudetect_output.stdout);
-    
-    // AMD
-    if gpudetect.contains("AMD") {
-        info!("AMD GPU detected.");
-        packages.extend(["xf86-video-amdgpu", "opencl-amd"]);
-    }
-    
-    // ATI (legacy, not reporting AMD)
-    if gpudetect.contains("ATI") && !gpudetect.contains("AMD") {
-        info!("ATI GPU detected.");
-        packages.push("opencl-mesa");
-    }
-    
     // NVIDIA
     if gpudetect.contains("NVIDIA") {
         info!("NVIDIA GPU detected.");
-
         if is_nix() {
             let graphics_nix = "/mnt/etc/nixos/modules/hardware/graphics/default.nix";
  
@@ -299,9 +282,35 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
                 ),
                 "Uncomment NVIDIA video drivers",
             );
- 
-            return packages;
         }
+    }
+}
+
+pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
+    let mut packages: Vec<&'static str> = Vec::new();
+
+    // -------- GPU --------
+    let gpudetect_output = exec_eval_result(
+        exec_output("lspci", vec![String::from("-k")]),
+        "Detect the GPU",
+    );
+    let gpudetect = String::from_utf8_lossy(&gpudetect_output.stdout);
+    
+    // AMD
+    if gpudetect.contains("AMD") {
+        info!("AMD GPU detected.");
+        packages.extend(["xf86-video-amdgpu", "opencl-amd"]);
+    }
+    
+    // ATI (legacy, not reporting AMD)
+    if gpudetect.contains("ATI") && !gpudetect.contains("AMD") {
+        info!("ATI GPU detected.");
+        packages.push("opencl-mesa");
+    }
+    
+    // NVIDIA
+    if gpudetect.contains("NVIDIA") {
+        info!("NVIDIA GPU detected.");
     
         // Family-specific handling
         let mut matched_family = false;

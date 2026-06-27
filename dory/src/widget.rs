@@ -776,27 +776,23 @@ impl LineEditor {
 impl ConfigWidget for LineEditor {
   fn handle_input(&mut self, key: KeyEvent) -> Signal {
     match key.code {
-      KeyCode::Left => {
-        if self.cursor > 0 {
+      KeyCode::Left
+        if self.cursor > 0 => {
           self.cursor -= 1;
         }
-      }
-      KeyCode::Right => {
-        if self.cursor < self.value.len() {
+      KeyCode::Right
+        if self.cursor < self.value.len() => {
           self.cursor += 1;
         }
-      }
-      KeyCode::Backspace => {
-        if self.cursor > 0 && !self.value.is_empty() {
+      KeyCode::Backspace
+        if self.cursor > 0 && !self.value.is_empty() => {
           self.value.remove(self.cursor - 1);
           self.cursor -= 1;
         }
-      }
-      KeyCode::Delete => {
-        if self.cursor < self.value.len() && !self.value.is_empty() {
+      KeyCode::Delete
+        if self.cursor < self.value.len() && !self.value.is_empty() => {
           self.value.remove(self.cursor);
         }
-      }
       KeyCode::Char(c) => {
         self.value.insert(self.cursor, c);
         self.cursor += 1;
@@ -944,7 +940,7 @@ impl StrList {
         .enumerate()
         .filter_map(|(i, item)| matcher.fuzzy_match(item, &f).map(|score| (i, score)))
         .collect();
-      results.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+      results.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
       self.filtered_items = results
         .into_iter()
         .map(|(i, _)| StrListItem { idx: i })
@@ -1131,16 +1127,14 @@ impl ConfigWidget for OptimizedStrList {
 impl ConfigWidget for StrList {
   fn handle_input(&mut self, key: KeyEvent) -> Signal {
     match key.code {
-      KeyCode::Up | KeyCode::Char('k') => {
-        if self.selected_idx > 0 {
+      KeyCode::Up | KeyCode::Char('k')
+        if self.selected_idx > 0 => {
           self.selected_idx -= 1;
         }
-      }
-      KeyCode::Down | KeyCode::Char('j') => {
-        if self.selected_idx + 1 < self.items.len() {
+      KeyCode::Down | KeyCode::Char('j')
+        if self.selected_idx + 1 < self.items.len() => {
           self.selected_idx += 1;
         }
-      }
       KeyCode::Enter => {
         self.committed = Some(self.items[self.selected_idx].clone());
         self.committed_idx = Some(self.selected_idx);

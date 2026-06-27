@@ -525,15 +525,31 @@ fn create_partition(
             &format!("Enable boot flag on partition #{partnum}"));
     }
 
-    /*
-    // Inform kernel so /dev nodes appear quickly
+    // Inform the kernel of the new table and wait for udev to recreate the /dev
+    // nodes BEFORE we mkfs/mount. Without this, a stale partition node (from a
+    // previous table) can still map to the old offsets: mkfs writes a valid
+    // filesystem at the old location, then the later mount sees the new geometry
+    // and fails with "bad superblock". These are best-effort (Continue), since
+    // partprobe can return EBUSY and must not abort the install.
     exec_eval(
-        exec(ExecMode::Direct, "partprobe", vec![dev.clone()], OnFail::Error),
+        exec(ExecMode::Direct, "partprobe", vec![dev.clone()], OnFail::Continue),
         &format!("Inform kernel of new partition on {}", device.display()),
     );
-    // optional but often helpful
-    exec_eval(exec(ExecMode::Direct, "udevadm", vec!["settle".into()], OnFail::Error), "Wait for /dev nodes");
-    */
+    exec_eval(
+        exec(ExecMode::Direct, "udevadm", vec!["settle".into()], OnFail::Continue),
+        "Wait for udev to settle",
+    );
+    // Block until THIS specific partition node is present with current attributes,
+    // so mkfs and the later mount agree on where the partition lives on disk.
+    exec_eval(
+        exec(
+            ExecMode::Direct,
+            "udevadm",
+            vec!["wait".into(), "--timeout=10".into(), blockdevice.to_string()],
+            OnFail::Continue,
+        ),
+        &format!("Wait for {blockdevice} to appear"),
+    );
 }
 
 fn delete_partition(device: &Path, blockdevice: &str, mountpoint: &str) {
@@ -617,16 +633,20 @@ fn delete_partition(device: &Path, blockdevice: &str, mountpoint: &str) {
     );
 
     // --- inform the kernel about the table change ----------------------------
-    /*
+    // Best-effort: re-read the table and let udev tear down the deleted node so a
+    // stale partition node doesn't linger into the create/format phase.
     exec_eval(
-        exec(ExecMode::Direct, "partprobe", vec![device.to_string_lossy().to_string()], OnFail::Error),
+        exec(ExecMode::Direct, "partprobe", vec![device.to_string_lossy().to_string()], OnFail::Continue),
         format!(
             "Inform kernel of partition table changes on {}",
             device.display()
         )
         .as_str(),
     );
-    */
+    exec_eval(
+        exec(ExecMode::Direct, "udevadm", vec!["settle".into()], OnFail::Continue),
+        "Wait for udev to settle after delete",
+    );
 }
 
 fn path_depth(mp: &str) -> usize {
