@@ -421,8 +421,8 @@ pub fn gpu_check_nix() {
                 files_eval(
                     files::sed_file(
                         graphics_nix,
-                        r"prime\.sync\.enable\s*=.*",
-                        "prime.sync.enable = true;",
+                        r"sync\.enable\s*=.*",
+                        "sync.enable = true;",
                     ),
                     "Enable NVIDIA PRIME sync",
                 );
