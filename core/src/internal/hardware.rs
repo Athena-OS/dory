@@ -1,4 +1,5 @@
-use log::info;
+use log::{info, warn};
+use regex::Regex;
 use shared::args::{is_arch, is_nix};
 use shared::files;
 use shared::exec::exec_output;
@@ -230,18 +231,130 @@ pub fn cpu_check() -> Vec<&'static str> {
     packages
 }
 
+/// Vendor of a PCI display device, as far as we care for graphics configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GpuVendor {
+    Nvidia,
+    Intel,
+    Amd,
+    Other,
+}
+
+/// A detected display-class PCI device together with its X.org/NixOS-style bus ID.
+#[derive(Debug, Clone)]
+struct GpuDevice {
+    vendor: GpuVendor,
+    /// Bus ID in the form expected by `hardware.nvidia.prime.*BusId`,
+    /// e.g. `PCI:1@0:0:0` (bus@domain:device:function, all in decimal).
+    bus_id: String,
+    /// The descriptive part of the `lspci` line (everything after the PCI
+    /// address), e.g. `3D controller [0302]: NVIDIA Corporation TU106M ...`.
+    /// Kept so callers can match on chip codenames (TU106, GM204, ...).
+    description: String,
+}
+
+/// Convert a PCI address as printed by `lspci -D` (hex `domain:bus:device.function`,
+/// e.g. `0000:01:00.0`) into the `PCI:bus@domain:device:function` form (decimal)
+/// used by the NixOS `hardware.nvidia.prime` bus-ID options.
+fn pci_addr_to_busid(addr: &str) -> Option<String> {
+    // Split off the function (after the dot).
+    let (head, func_hex) = addr.rsplit_once('.')?;
+    let segments: Vec<&str> = head.split(':').collect();
+
+    // With `-D` we get domain:bus:device; without it, bus:device.
+    let (domain_hex, bus_hex, device_hex) = match segments.as_slice() {
+        [domain, bus, device] => (*domain, *bus, *device),
+        [bus, device] => ("0", *bus, *device),
+        _ => return None,
+    };
+
+    let domain = u32::from_str_radix(domain_hex.trim(), 16).ok()?;
+    let bus = u32::from_str_radix(bus_hex.trim(), 16).ok()?;
+    let device = u32::from_str_radix(device_hex.trim(), 16).ok()?;
+    let function = u32::from_str_radix(func_hex.trim(), 16).ok()?;
+
+    Some(format!("PCI:{bus}@{domain}:{device}:{function}"))
+}
+
+/// Detect every display-class PCI device on the system using `lspci -D -nn`,
+/// returning each one's vendor and computed bus ID.
+fn detect_gpus() -> Vec<GpuDevice> {
+    let output = match exec_output("lspci", vec![String::from("-D"), String::from("-nn")]) {
+        Ok(out) => out,
+        Err(e) => {
+            // Graphics detection is best-effort: never abort the install over it.
+            warn!("Could not run `lspci -D -nn` to detect GPUs: {e}");
+            return Vec::new();
+        }
+    };
+
+    let listing = String::from_utf8_lossy(&output.stdout);
+
+    // First single 4-hex-digit bracket on a line is the PCI class code, e.g. `[0300]`.
+    // Vendor:device pairs look like `[10de:1f95]` and are skipped by this pattern.
+    let class_re = Regex::new(r"\[([0-9a-fA-F]{4})\]").unwrap();
+    // The vendor ID is the first half of a `[vendor:device]` pair.
+    let vendor_re = Regex::new(r"\[([0-9a-fA-F]{4}):[0-9a-fA-F]{4}\]").unwrap();
+
+    let mut gpus = Vec::new();
+
+    for line in listing.lines() {
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let addr = match parts.next() {
+            Some(a) if !a.is_empty() => a,
+            _ => continue,
+        };
+        let rest = parts.next().unwrap_or("");
+
+        // Keep only display controllers (PCI base class 0x03: VGA/3D/Display).
+        let class = match class_re.captures(rest) {
+            Some(c) => c[1].to_string(),
+            None => continue,
+        };
+        if !class.starts_with("03") {
+            continue;
+        }
+
+        let vendor = match vendor_re.captures(rest) {
+            Some(v) => match v[1].to_lowercase().as_str() {
+                "10de" => GpuVendor::Nvidia,
+                "8086" => GpuVendor::Intel,
+                "1002" | "1022" => GpuVendor::Amd,
+                _ => GpuVendor::Other,
+            },
+            None => GpuVendor::Other,
+        };
+
+        let bus_id = match pci_addr_to_busid(addr) {
+            Some(id) => id,
+            None => {
+                warn!("Could not parse PCI bus ID from `{addr}`");
+                continue;
+            }
+        };
+
+        info!("Detected display device {addr} -> {vendor:?} (busID {bus_id})");
+        gpus.push(GpuDevice {
+            vendor,
+            bus_id,
+            description: rest.to_string(),
+        });
+    }
+
+    gpus
+}
+
 pub fn gpu_check_nix() {
-    let gpudetect_output = exec_eval_result(
-        exec_output("lspci", vec![String::from("-k")]),
-        "Detect the GPU",
-    );
-    let gpudetect = String::from_utf8_lossy(&gpudetect_output.stdout);
+    let gpus = detect_gpus();
+
+    let nvidia = gpus.iter().find(|g| g.vendor == GpuVendor::Nvidia);
+
     // NVIDIA
-    if gpudetect.contains("NVIDIA") {
+    if let Some(nvidia) = nvidia {
         info!("NVIDIA GPU detected.");
         if is_nix() {
             let graphics_nix = "/mnt/etc/nixos/modules/hardware/graphics/default.nix";
- 
+
             files_eval(
                 files::sed_file(
                     graphics_nix,
@@ -257,6 +370,15 @@ pub fn gpu_check_nix() {
                     "powerManagement.enable = true;",
                 ),
                 "Enable NVIDIA power management",
+            );
+            // Use the open-source NVIDIA kernel modules.
+            files_eval(
+                files::sed_file(
+                    graphics_nix,
+                    r"\bopen\s*=.*",
+                    "open = true;",
+                ),
+                "Enable NVIDIA open kernel modules",
             );
             files_eval(
                 files::sed_file(
@@ -282,6 +404,66 @@ pub fn gpu_check_nix() {
                 ),
                 "Uncomment NVIDIA video drivers",
             );
+
+            // ---- Hybrid GPU (PRIME) handling ----
+            // If an integrated GPU (Intel or AMD) sits alongside the NVIDIA dGPU,
+            // enable PRIME sync and wire up the computed bus IDs.
+            let igpu = gpus
+                .iter()
+                .find(|g| matches!(g.vendor, GpuVendor::Intel | GpuVendor::Amd));
+
+            if let Some(igpu) = igpu {
+                info!(
+                    "Hybrid GPU setup detected (NVIDIA dGPU + {:?} iGPU). Configuring PRIME.",
+                    igpu.vendor
+                );
+
+                files_eval(
+                    files::sed_file(
+                        graphics_nix,
+                        r"prime\.sync\.enable\s*=.*",
+                        "prime.sync.enable = true;",
+                    ),
+                    "Enable NVIDIA PRIME sync",
+                );
+
+                // Compute and assign the NVIDIA bus ID.
+                files_eval(
+                    files::sed_file(
+                        graphics_nix,
+                        r"nvidiaBusId\s*=.*",
+                        &format!("nvidiaBusId = \"{}\";", nvidia.bus_id),
+                    ),
+                    "Set NVIDIA PRIME bus ID",
+                );
+
+                // Uncomment and assign the integrated GPU's bus ID.
+                match igpu.vendor {
+                    GpuVendor::Intel => {
+                        files_eval(
+                            files::sed_file(
+                                graphics_nix,
+                                r"#\s*intelBusId\s*=.*",
+                                &format!("intelBusId = \"{}\";", igpu.bus_id),
+                            ),
+                            "Set Intel PRIME bus ID",
+                        );
+                    }
+                    GpuVendor::Amd => {
+                        files_eval(
+                            files::sed_file(
+                                graphics_nix,
+                                r"#\s*amdgpuBusId\s*=.*",
+                                &format!("amdgpuBusId = \"{}\";", igpu.bus_id),
+                            ),
+                            "Set AMD PRIME bus ID",
+                        );
+                    }
+                    _ => {}
+                }
+            } else {
+                info!("Single NVIDIA GPU detected; skipping PRIME/hybrid configuration.");
+            }
         }
     }
 }
@@ -290,31 +472,45 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
     let mut packages: Vec<&'static str> = Vec::new();
 
     // -------- GPU --------
-    let gpudetect_output = exec_eval_result(
-        exec_output("lspci", vec![String::from("-k")]),
-        "Detect the GPU",
-    );
-    let gpudetect = String::from_utf8_lossy(&gpudetect_output.stdout);
-    
+    // Reuse the shared display-device detector: it only considers PCI
+    // display-class devices, so substring checks below can't be fooled by
+    // non-GPU hardware (e.g. an Intel NIC or an AMD-CPU host bridge).
+    let gpus = detect_gpus();
+
     // AMD
-    if gpudetect.contains("AMD") {
+    if gpus
+        .iter()
+        .any(|g| g.vendor == GpuVendor::Amd && g.description.contains("AMD"))
+    {
         info!("AMD GPU detected.");
         packages.extend(["xf86-video-amdgpu", "opencl-amd"]);
     }
-    
+
     // ATI (legacy, not reporting AMD)
-    if gpudetect.contains("ATI") && !gpudetect.contains("AMD") {
+    if gpus
+        .iter()
+        .any(|g| g.description.contains("ATI") && !g.description.contains("AMD"))
+    {
         info!("ATI GPU detected.");
         packages.push("opencl-mesa");
     }
-    
+
     // NVIDIA
-    if gpudetect.contains("NVIDIA") {
+    if gpus.iter().any(|g| g.vendor == GpuVendor::Nvidia) {
         info!("NVIDIA GPU detected.");
-    
+
+        // Combined descriptions of every NVIDIA display device, used for
+        // chip-family (codename) matching.
+        let gpudetect: String = gpus
+            .iter()
+            .filter(|g| g.vendor == GpuVendor::Nvidia)
+            .map(|g| g.description.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
         // Family-specific handling
         let mut matched_family = false;
-        
+
         if gpudetect.contains("GM107") || gpudetect.contains("GM108") || gpudetect.contains("GM200")
             || gpudetect.contains("GM204") || gpudetect.contains("GM206") || gpudetect.contains("GM20B")
         {
@@ -327,7 +523,7 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
             }
             packages.push("nvidia-settings");
         }
-        
+
         if gpudetect.contains("TU102") || gpudetect.contains("TU104") || gpudetect.contains("TU106")
             || gpudetect.contains("TU116") || gpudetect.contains("TU117")
         {
@@ -340,7 +536,7 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
             }
             packages.push("nvidia-settings");
         }
-        
+
         if gpudetect.contains("GK104") || gpudetect.contains("GK107") || gpudetect.contains("GK106")
             || gpudetect.contains("GK110") || gpudetect.contains("GK110B") || gpudetect.contains("GK208B")
             || gpudetect.contains("GK208") || gpudetect.contains("GK20A") || gpudetect.contains("GK210")
@@ -349,7 +545,7 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
             matched_family = true;
             packages.extend(["nvidia-470xx-dkms", "nvidia-470xx-settings"]);
         }
-        
+
         if gpudetect.contains("GF100") || gpudetect.contains("GF108") || gpudetect.contains("GF106")
             || gpudetect.contains("GF104") || gpudetect.contains("GF110") || gpudetect.contains("GF114")
             || gpudetect.contains("GF116") || gpudetect.contains("GF117") || gpudetect.contains("GF119")
@@ -358,7 +554,7 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
             matched_family = true;
             packages.extend(["nvidia-390xx-dkms", "nvidia-390xx-settings"]);
         }
-        
+
         if gpudetect.contains("G80") || gpudetect.contains("G84") || gpudetect.contains("G86")
             || gpudetect.contains("G92") || gpudetect.contains("G94") || gpudetect.contains("G96")
             || gpudetect.contains("G98") || gpudetect.contains("GT200") || gpudetect.contains("GT215")
@@ -375,16 +571,21 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
             }
             packages.push("nvidia-340xx-settings");
         }
-    
+
         if !matched_family {
             packages.extend(["nvidia-open-dkms", "nvidia-settings"]);
         }
-        
+
         // Common extras on Arch
         packages.extend(["opencl-nvidia", "gwe", "nvtop"]);
-        
-        // Hybrid GPU setup? add envycontrol on Arch like your original
-        if gpudetect.contains("Intel") || gpudetect.contains("AMD") || gpudetect.contains("ATI") {
+
+        // Hybrid GPU setup? add envycontrol. Only a *display* device from
+        // another vendor counts, so a discrete-only NVIDIA box with an Intel
+        // NIC is not misdetected as hybrid.
+        if gpus
+            .iter()
+            .any(|g| matches!(g.vendor, GpuVendor::Intel | GpuVendor::Amd))
+        {
             packages.push("envycontrol");
         }
     }
