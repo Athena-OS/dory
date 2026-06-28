@@ -147,6 +147,7 @@ pub struct MountSpec {
     pub device: String,
     pub mountpoint: String,
     pub options: String,
+    pub fstype: String,
     pub is_swap: bool,
 }
 

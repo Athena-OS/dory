@@ -206,7 +206,7 @@ fn fmt_mount(mountpoint: &str, filesystem: &str, blockdevice: &str, flags: &[Str
                       &format!("Create staging dir {stage}"));
 
             // Temporary mount only for subvolume creation
-            mount(&bdevice, &stage, "");
+            mount(&bdevice, &stage, "", "btrfs");
             exec_eval(
                 exec_workdir("btrfs", &stage, vec!["subvolume".into(), "create".into(), "@".into()]),
                 "Create btrfs subvolume @",
@@ -224,12 +224,14 @@ fn fmt_mount(mountpoint: &str, filesystem: &str, blockdevice: &str, flags: &[Str
                     device: bdevice.clone(),
                     mountpoint: "/".into(),
                     options: "subvol=@".into(),
+                    fstype: "btrfs".into(),
                     is_swap: false,
                 });
                 plan.push(MountSpec {
                     device: bdevice.clone(),
                     mountpoint: "/home".into(),
                     options: "subvol=@home".into(),
+                    fstype: "btrfs".into(),
                     is_swap: false,
                 });
             } else if !mountpoint.is_empty() {
@@ -238,6 +240,7 @@ fn fmt_mount(mountpoint: &str, filesystem: &str, blockdevice: &str, flags: &[Str
                     device: bdevice.clone(),
                     mountpoint: mountpoint.to_string(),
                     options: String::new(),
+                    fstype: "btrfs".into(),
                     is_swap: false,
                 });
             }
@@ -273,6 +276,7 @@ fn fmt_mount(mountpoint: &str, filesystem: &str, blockdevice: &str, flags: &[Str
                 device: bdevice.clone(),
                 mountpoint: String::new(),
                 options: String::new(),
+                fstype: String::new(),
                 is_swap: true,
             });
             return plan; // nothing else to do
@@ -293,6 +297,7 @@ fn fmt_mount(mountpoint: &str, filesystem: &str, blockdevice: &str, flags: &[Str
             device: bdevice.clone(),
             mountpoint: mountpoint.to_string(),
             options: String::new(),
+            fstype: fs_to_mount_type(filesystem).to_string(),
             is_swap: false,
         });
     }
@@ -300,39 +305,45 @@ fn fmt_mount(mountpoint: &str, filesystem: &str, blockdevice: &str, flags: &[Str
     plan
 }
 
-pub fn mount(partition: &str, mountpoint: &str, options: &str) {
-    if !options.is_empty() {
-        exec_eval(
-            exec(
-                ExecMode::Direct,
-                "mount",
-                vec![
-                    String::from(partition),
-                    String::from(mountpoint),
-                    String::from("-o"),
-                    String::from(options),
-                ],
-                OnFail::Error,
-            ),
-            format!(
-                "Mount {partition} with options {options} at {mountpoint}"
-            )
-            .as_str(),
-        );
-    } else {
-        exec_eval(
-            exec(
-                ExecMode::Direct,
-                "mount",
-                vec![
-                    String::from(partition),
-                    String::from(mountpoint)
-                ],
-                OnFail::Error,
-            ),
-            format!("Mount {partition} with no options at {mountpoint}").as_str(),
-        );
+/// Map a requested filesystem to the type string the kernel's `mount -t`
+/// expects. Returns "" when we can't/shouldn't specify it (e.g. "don't format",
+/// where the on-disk fs is pre-existing and safe to auto-detect).
+fn fs_to_mount_type(filesystem: &str) -> &'static str {
+    match filesystem {
+        "vfat" | "fat32" | "fat" | "msdos" => "vfat",
+        "ext2" => "ext2",
+        "ext3" => "ext3",
+        "ext4" => "ext4",
+        "btrfs" => "btrfs",
+        "xfs" => "xfs",
+        "f2fs" => "f2fs",
+        "ntfs" => "ntfs3",
+        "minix" => "minix",
+        "bfs" => "bfs",
+        "cramfs" => "cramfs",
+        _ => "", // "don't format" / unknown => auto-detect
     }
+}
+
+pub fn mount(partition: &str, mountpoint: &str, options: &str, fstype: &str) {
+    // Always pass an explicit `-t <fstype>` when we know it. Right after mkfs,
+    // libblkid auto-detection can return a stale/wrong type (a just-deleted
+    // partition's old signature still in cache), which makes a bare `mount`
+    // fail with "wrong fs type, bad superblock" even though the fs is valid.
+    // An explicit type bypasses detection entirely.
+    let mut args = vec![String::from(partition), String::from(mountpoint)];
+    if !fstype.is_empty() {
+        args.push(String::from("-t"));
+        args.push(String::from(fstype));
+    }
+    if !options.is_empty() {
+        args.push(String::from("-o"));
+        args.push(String::from(options));
+    }
+    exec_eval(
+        exec(ExecMode::Direct, "mount", args, OnFail::Error),
+        format!("Mount {partition} ({}) at {mountpoint}", if fstype.is_empty() { "auto" } else { fstype }).as_str(),
+    );
 }
 
 pub fn umount(mountpoint: &str) {
@@ -692,11 +703,31 @@ fn mount_queue(mut plan: Vec<MountSpec>) {
             info!("{target} directory created.");
         }
 
-        if m.options.is_empty() {
-            mount(&m.device, &target, "");
-        } else {
-            mount(&m.device, &target, &m.options);
-        }
+        // The filesystem was just created by mkfs a moment ago. The kernel's
+        // block-device page/buffer cache for this node can still hold pre-mkfs
+        // content (the old/empty signature from when udev probed the freshly
+        // partitioned device). Mounting then reads a stale superblock and fails
+        // with "wrong fs type, bad superblock" even though the on-disk fs is
+        // perfectly valid (this is why a manual mount after reboot succeeds).
+        // Force coherence before mounting:
+        //   sync                -> flush mkfs's dirty writes to the device
+        //   blockdev --flushbufs-> BLKFLSBUF: sync + INVALIDATE the buffer cache
+        //   udevadm settle      -> let udev finish its re-probe so the blkid db
+        //                          (used later by genfstab for UUIDs) is current
+        exec_eval(
+            exec(ExecMode::Direct, "sync", vec![], OnFail::Continue),
+            "Flush pending writes before mount",
+        );
+        exec_eval(
+            exec(ExecMode::Direct, "blockdev", vec!["--flushbufs".into(), m.device.clone()], OnFail::Continue),
+            &format!("Invalidate stale buffer cache on {}", m.device),
+        );
+        exec_eval(
+            exec(ExecMode::Direct, "udevadm", vec!["settle".into()], OnFail::Continue),
+            "Wait for udev to settle before mount",
+        );
+
+        mount(&m.device, &target, &m.options, &m.fstype);
     }
 }
 
