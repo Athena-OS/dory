@@ -33,6 +33,39 @@ If running inside the included installer ISO:
 sudo dory
 ```
 
+## Screen readers
+
+Dory works with the speakup console screen reader (the ISO's speech boot
+entry) and with braille displays through brltty.
+
+* **Focus cursor.** The terminal cursor, which stays hidden, always sits on
+  the focused item: menu entry, list row, table row, button or text-field
+  caret. Readers that follow the cursor land on the right line.
+* **Speech.** When speakup is speaking on the console Dory runs on, Dory
+  takes over speech for its session. A full-screen interface otherwise makes
+  speakup read every redraw: fragments, spinners and the scrolling log. Dory
+  speaks:
+  * the focused item and its position ("Timezone, 2 of 12"), and the
+    description shown for it, only when they change;
+  * typed and deleted characters in text fields. Password fields say "star"
+    and never reveal their content;
+  * help popups when they open, and why an action was refused;
+  * installation milestones from the backend log, at most one every few
+    seconds, plus every warning and error. Package manager output and
+    progress bars are not spoken; after 45 seconds of silence a "Still
+    working" message reads the current progress line instead.
+
+  | Key | Action |
+  |---|---|
+  | `F2` | Repeat the focused item and its description |
+  | `F3` | Read the whole screen |
+  | `?` | Open the help of the current page |
+
+  speakup's own screen reading is switched off for Dory's console only, and
+  restored when Dory exits, panics or is killed by `SIGTERM`, `SIGHUP`,
+  `SIGINT` or `SIGQUIT`. Run `dory --no-speech` to leave speakup alone; the
+  focus cursor still works.
+
 ## Roadmap
 
 Propose your ideas.

@@ -17,6 +17,7 @@ flate2 = { version = "1", features = ["rust_backend"] }
 fuzzy-matcher = "0.3"
 rand = "0.10"
 ratatui = "0.30"
+signal-hook = "0.3"
 strip-ansi-escapes = "0.2"
 tempfile = "3"
 throbber-widgets-tui = "0.11"

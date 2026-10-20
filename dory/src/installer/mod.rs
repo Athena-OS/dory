@@ -705,6 +705,13 @@ impl Page for Menu {
                 Signal::Push(Box::new(ConfigPreview::new(installer)))
               } else {
                 self.border_flash_timer = 6;
+                // The refusal is only a flashing border on screen.
+                crate::a11y::alert(|| {
+                  format!(
+                    "Cannot continue. Not configured yet: {}",
+                    installer.missing_requirements().join(", ")
+                  )
+                });
                 Signal::Wait
               }
             }
@@ -1695,13 +1702,13 @@ impl Default for ExtraPackages {
 impl Page for ExtraPackages {
   fn render(&mut self, installer: &mut Installer, f: &mut Frame, area: Rect) {
     if !Self::is_arch(installer) {
-      let p = Paragraph::new("This page is available if the selected Base System is Arch.")
-        .alignment(Alignment::Center)
-        .block(
-          Block::default()
-            .borders(Borders::ALL)
-            .title("Extra Packages"),
-        );
+      const NOT_ARCH: &str = "This page is available if the selected Base System is Arch.";
+      crate::a11y::context(|c| c.push_str(NOT_ARCH));
+      let p = Paragraph::new(NOT_ARCH).alignment(Alignment::Center).block(
+        Block::default()
+          .borders(Borders::ALL)
+          .title("Extra Packages"),
+      );
       f.render_widget(p, area);
       return;
     }
@@ -1721,13 +1728,13 @@ impl Page for ExtraPackages {
 
     match &self.state {
       LoadState::Idle | LoadState::Syncing => {
-        let msg = Paragraph::new("Syncing package list with pacman -Sy...")
-          .alignment(Alignment::Center)
-          .block(
-            Block::default()
-              .borders(Borders::ALL)
-              .title("Extra Packages"),
-          );
+        const SYNCING: &str = "Syncing package list with pacman -Sy...";
+        crate::a11y::context(|c| c.push_str(SYNCING));
+        let msg = Paragraph::new(SYNCING).alignment(Alignment::Center).block(
+          Block::default()
+            .borders(Borders::ALL)
+            .title("Extra Packages"),
+        );
         f.render_widget(msg, area);
       }
       LoadState::Failed(err) => {
@@ -1747,6 +1754,7 @@ impl Page for ExtraPackages {
           vec![(None, String::new())],
           vec![(None, "Press Esc to go back.".to_string())],
         ]);
+        crate::a11y::context_lines("Extra Packages", &lines);
         let p = Paragraph::new(lines)
           .block(
             Block::default()
@@ -1953,6 +1961,30 @@ impl Page for ConfigPreview {
       )))
       .wrap(Wrap { trim: false });
     f.render_widget(config_paragraph, chunks[1]);
+
+    // Scrolling the preview reads it line by line, top visible line first.
+    if !self.button_row.is_focused() {
+      let content = chunks[1];
+      if content.width > 2 && content.height > 2 {
+        crate::a11y::cursor(content.x + 1, content.y + 1);
+      }
+      let region = match self.current_view {
+        ConfigView::System => "System configuration preview",
+        ConfigView::Partitioning => "Partition configuration preview",
+      };
+      crate::a11y::focus(region, || match lines.get(start_line) {
+        Some(line) => {
+          let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+          format!(
+            "{}, line {} of {}",
+            text.trim(),
+            start_line + 1,
+            lines.len()
+          )
+        }
+        None => "empty".into(),
+      });
+    }
 
     // Buttons
     self.button_row.render(f, chunks[2]);
@@ -2254,6 +2286,18 @@ impl Page for AgeVerification {
       .direction(Direction::Vertical)
       .constraints([Constraint::Min(0), Constraint::Length(3)])
       .split(inner);
+
+    // Speak the prompt, then the joke once it is complete: never the
+    // character-by-character reveal.
+    let complete = self.joke_fully_visible();
+    crate::a11y::context(|c| {
+      c.push_str("Age verification\n");
+      c.push_str("Please confirm you are old enough to partition a disk...");
+      if complete {
+        c.push('\n');
+        c.push_str(Self::full_joke_text());
+      }
+    });
 
     let paragraph = Paragraph::new(lines)
       .alignment(Alignment::Center)
@@ -2751,5 +2795,60 @@ impl Page for InstallFailed {
       _ => {}
     }
     Signal::Wait
+  }
+}
+
+#[cfg(test)]
+mod a11y_tests {
+  use super::*;
+  use ratatui::{Terminal, backend::TestBackend};
+
+  fn say(menu: &mut Menu, installer: &mut Installer) -> String {
+    let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    term
+      .draw(|f| {
+        crate::a11y::begin_frame();
+        menu.render(installer, f, f.area());
+      })
+      .unwrap();
+    crate::a11y::utterance_for_tests()
+  }
+
+  fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+  }
+
+  #[test]
+  fn main_menu_speaks_item_position_and_description_then_only_changes() {
+    crate::a11y::enable_for_tests();
+    let mut installer = Installer::new();
+    let mut menu = Menu::new();
+    let first = say(&mut menu, &mut installer);
+    assert!(
+      first.starts_with("Main Menu. Base System, 1 of 12. Base System. Select the base system"),
+      "{first}"
+    );
+    menu.handle_input(&mut installer, key(KeyCode::Down));
+    let second = say(&mut menu, &mut installer);
+    assert!(
+      second.starts_with("Timezone, 2 of 12. Timezone. Select the timezone"),
+      "{second}"
+    );
+    assert!(
+      !second.contains("Main Menu"),
+      "region is not repeated: {second}"
+    );
+
+    // Jump to the buttons and press Done with nothing configured.
+    menu.handle_input(&mut installer, key(KeyCode::End));
+    let buttons = say(&mut menu, &mut installer);
+    assert!(buttons.starts_with("Done, button"), "{buttons}");
+    assert!(buttons.contains("Required Config"), "{buttons}");
+    menu.handle_input(&mut installer, key(KeyCode::Enter));
+    let refused = say(&mut menu, &mut installer);
+    assert!(
+      refused.starts_with("Cannot continue. Not configured yet: Base System, Timezone"),
+      "{refused}"
+    );
   }
 }

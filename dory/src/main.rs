@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use crate::installer::{AgeVerification, Installer, ListKind, ListPage, Menu, Page, Signal};
 
+mod a11y;
 mod drives;
 mod installer;
 #[macro_use]
@@ -94,6 +95,8 @@ fn main() -> anyhow::Result<()> {
   // Restore the terminal if the installer panics, so the user is not left
   // with a raw-mode console.
   std::panic::set_hook(Box::new(|panic_info| {
+    // First: a muted speakup would leave a blind user with a silent console.
+    a11y::shutdown();
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
     eprintln!("====================================================");
@@ -115,6 +118,8 @@ fn main() -> anyhow::Result<()> {
       // the terminal is fully restored, THEN apply + print on the real screen.
       let mut stdout = io::stdout();
       let selected: Option<String> = {
+        // Declared first so it is dropped last, after the terminal is restored.
+        let _speech = a11y::init(cli.no_speech);
         let _raw_guard = RawModeGuard::new(&mut stdout)?;
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         run_keymap_picker(&mut terminal)?
@@ -180,6 +185,7 @@ fn main() -> anyhow::Result<()> {
   // TUI path: no config files provided, launch the interactive installer
   let mut stdout = io::stdout();
   let res = {
+    let _speech = a11y::init(cli.no_speech);
     let _raw_guard = RawModeGuard::new(&mut stdout)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     debug!("Running TUI");
@@ -294,11 +300,14 @@ pub fn run_app(terminal: &mut Term, log_path: &Path) -> anyhow::Result<()> {
 
   loop {
     terminal.draw(|f| {
+      a11y::begin_frame();
       let body = render_header(f, "Install Athena OS");
       if let Some(page) = page_stack.last_mut() {
         page.render(&mut installer, f, body);
       }
+      a11y::capture(f.buffer_mut());
     })?;
+    a11y::end_frame(terminal)?;
 
     // Pages can emit a signal without input (e.g. installation finished).
     if let Some(page) = page_stack.last()
@@ -310,6 +319,9 @@ pub fn run_app(terminal: &mut Term, log_path: &Path) -> anyhow::Result<()> {
 
     let animated = page_stack.last().is_some_and(|p| p.needs_tick());
     if let Some(key) = next_key(animated, &mut last_tick)? {
+      if a11y::handle_key(&key) {
+        continue;
+      }
       let Some(page) = page_stack.last_mut() else {
         page_stack.push(Box::new(Menu::new()));
         continue;
@@ -333,11 +345,17 @@ pub fn run_keymap_picker(terminal: &mut Term) -> anyhow::Result<Option<String>> 
 
   loop {
     terminal.draw(|f| {
+      a11y::begin_frame();
       let body = render_header(f, "Athena OS - Set Keyboard Layout");
       page.render(&mut installer, f, body);
+      a11y::capture(f.buffer_mut());
     })?;
+    a11y::end_frame(terminal)?;
 
     if let Some(key) = next_key(page.needs_tick(), &mut last_tick)? {
+      if a11y::handle_key(&key) {
+        continue;
+      }
       match page.handle_input(&mut installer, key) {
         Signal::Pop => {
           user_confirmed = true;

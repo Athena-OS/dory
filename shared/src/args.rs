@@ -52,6 +52,13 @@ pub struct Cli {
   #[arg(long = "set-keymap", value_name = "KEYMAP",
           num_args = 0..=1, default_missing_value = "")]
   pub set_keymap: Option<String>,
+
+  /// Leave speakup alone. By default, when the speakup screen reader is
+  /// speaking on this console, the TUI takes over speech (focused item,
+  /// changes, help and install progress; F2 repeats, F3 reads the screen)
+  /// and gives it back on exit.
+  #[arg(long = "no-speech")]
+  pub no_speech: bool,
 }
 
 #[derive(Clone, Copy, Debug)]

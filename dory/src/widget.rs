@@ -20,9 +20,16 @@ use ratatui::{
   widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Table, TableState, Wrap},
 };
 
-use crate::installer::Signal;
+use crate::{a11y, installer::Signal};
 use serde_json::{Map, Value};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt::Write as _};
+
+/// Column where centre-aligned single-line text of `len` chars starts
+/// (same arithmetic as ratatui's `Alignment::Center`).
+fn centered_x(area: Rect, len: usize) -> u16 {
+  let len = u16::try_from(len).unwrap_or(u16::MAX);
+  area.x + area.width.saturating_sub(len) / 2
+}
 
 /// Package selection model: one immutable, sorted list of names plus index
 /// sets. Nothing is cloned when filtering or moving packages between panes.
@@ -430,14 +437,25 @@ impl ConfigWidget for CheckBox {
     };
 
     let checkbox_char = if self.checked { "[x]" } else { "[ ]" };
-    let content = Paragraph::new(Span::styled(
-      format!("{} {}", checkbox_char, self.label),
-      style,
-    ))
-    .alignment(Alignment::Center)
-    .block(Block::default().style(style));
+    let text = format!("{} {}", checkbox_char, self.label);
+    let text_len = text.chars().count();
+    let content = Paragraph::new(Span::styled(text, style))
+      .alignment(Alignment::Center)
+      .block(Block::default().style(style));
 
     f.render_widget(content, area);
+
+    if self.focused && !area.is_empty() {
+      a11y::cursor(centered_x(area, text_len), area.y);
+      a11y::focus("", || {
+        let state = if self.checked {
+          "checked"
+        } else {
+          "not checked"
+        };
+        format!("{}, checkbox, {state}", self.label)
+      });
+    }
   }
 
   fn get_value(&self) -> Option<Value> {
@@ -487,11 +505,20 @@ impl ConfigWidget for Button {
       Style::default().fg(Color::White).bg(Color::Reset)
     };
 
-    let content = Paragraph::new(Span::styled(format!(" {} ", self.label), style))
+    let text = format!(" {} ", self.label);
+    let text_len = text.chars().count();
+    let content = Paragraph::new(Span::styled(text, style))
       .alignment(Alignment::Center)
       .block(Block::default().style(style));
 
     f.render_widget(content, area);
+
+    if self.focused && !area.is_empty() {
+      // +1: skip the leading pad so the cursor sits on the label itself.
+      let x = (centered_x(area, text_len) + 1).min(area.right() - 1);
+      a11y::cursor(x, area.y);
+      a11y::focus("", || format!("{}, button", self.label));
+    }
   }
 
   fn get_value(&self) -> Option<Value> {
@@ -666,8 +693,24 @@ impl ConfigWidget for LineEditor {
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
       ));
       f.render_widget(error_paragraph, chunks[1]);
+      a11y::context(|c| c.push_str(err));
     }
     f.render_widget(self.as_widget(), chunks[0]);
+
+    let field = chunks[0];
+    if self.focused && field.width > 2 && field.height > 2 {
+      let col = u16::try_from(self.cursor)
+        .unwrap_or(u16::MAX)
+        .min(field.width - 3);
+      a11y::cursor(field.x + 1 + col, field.y + 1);
+      a11y::edit(
+        &self.title,
+        &self.chars,
+        self.cursor,
+        self.is_secret,
+        self.placeholder.as_deref(),
+      );
+    }
   }
 
   fn focus(&mut self) {
@@ -815,6 +858,32 @@ impl ConfigWidget for StrList {
       .highlight_style(highlight);
 
     f.render_stateful_widget(list, area, &mut state);
+
+    if self.focused {
+      let rows = area.height.saturating_sub(2) as usize;
+      let row = self.selected_idx.saturating_sub(state.offset());
+      if self.selected_idx < self.filtered.len() && row < rows && area.width > 2 {
+        a11y::cursor(area.x + 1, area.y + 1 + row as u16);
+      }
+      a11y::focus(&self.title, || match self.selected_item() {
+        Some(item) => {
+          let chosen = if self.committed_idx == Some(self.selected_idx) {
+            ", selected"
+          } else {
+            ""
+          };
+          let (i, n) = (self.selected_idx + 1, self.filtered.len());
+          format!("{item}{chosen}, {i} of {n}")
+        }
+        None if self.filter.is_some() => "no matches".into(),
+        None => "empty".into(),
+      });
+    } else if self.filter.is_some() {
+      // Typing in a search bar above: say how many items still match.
+      a11y::context(|c| {
+        let _ = write!(c, "{} matches", self.filtered.len());
+      });
+    }
   }
   fn focus(&mut self) {
     self.focused = true;
@@ -865,6 +934,7 @@ impl<'a> ConfigWidget for InfoBox<'a> {
       .block(block)
       .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(paragraph, area);
+    a11y::context_lines(&self.title, &self.content);
   }
   fn focus(&mut self) {
     // InfoBox does not need focus
@@ -1139,6 +1209,23 @@ impl<'a> ConfigWidget for InstallSteps<'a> {
       .wrap(ratatui::widgets::Wrap { trim: true });
 
     f.render_widget(paragraph, area);
+
+    // Spoken when a step changes state; the spinner itself never is.
+    a11y::context(|c| {
+      c.push_str(&self.title);
+      for (line, status) in &self.steps {
+        c.push('\n');
+        for span in &line.spans {
+          c.push_str(&span.content);
+        }
+        c.push_str(match status {
+          StepStatus::Inactive => " waiting",
+          StepStatus::Running => " in progress",
+          StepStatus::Completed => " done",
+          StepStatus::Failed => " failed",
+        });
+      }
+    });
   }
 
   fn focus(&mut self) {
@@ -1366,6 +1453,40 @@ impl ConfigWidget for TableWidget {
       .highlight_symbol(">> ");
 
     f.render_stateful_widget(table, area, &mut state);
+
+    if self.focused {
+      // Rows start below the border, the header and its bottom margin.
+      const FIRST_ROW: u16 = 3;
+      if let Some(sel) = state.selected()
+        && area.width > 2
+      {
+        let y = area.y + FIRST_ROW + sel.saturating_sub(state.offset()) as u16;
+        if y < area.bottom().saturating_sub(1) {
+          a11y::cursor(area.x + 1, y);
+        }
+      }
+      a11y::focus(&self.title, || {
+        let Some((idx, row)) = self
+          .selected_row
+          .and_then(|i| self.rows.get(i).map(|r| (i, r)))
+        else {
+          return "empty".into();
+        };
+        let mut text = String::new();
+        for (header, field) in self.headers.iter().zip(row) {
+          let field = field.trim();
+          if field.is_empty() {
+            continue;
+          }
+          if !text.is_empty() {
+            text.push_str(", ");
+          }
+          let _ = write!(text, "{} {field}", header.trim());
+        }
+        let _ = write!(text, ", row {} of {}", idx + 1, self.rows.len());
+        text
+      });
+    }
   }
 }
 
@@ -1426,7 +1547,22 @@ impl<'a> HelpModal<'a> {
       .wrap(ratatui::widgets::Wrap { trim: true });
 
     f.render_widget(help_paragraph, popup_area);
+
+    if !popup_area.is_empty() {
+      a11y::cursor(popup_area.x + 1, popup_area.y + 1);
+    }
+    if a11y::speaking() {
+      let title = format!("Help: {}. Press Escape to close", self.title);
+      a11y::modal(&title, &self.content);
+    }
   }
+}
+
+/// The focused list of the package picker: the item under the cursor (only
+/// looked up while speech is on) and the list length.
+struct ListFocus<'a> {
+  current: Option<&'a str>,
+  total: usize,
 }
 
 /// Which pane of the package picker has keyboard focus.
@@ -1545,8 +1681,9 @@ impl PackagePicker {
     title: &str,
     idxs: impl Iterator<Item = usize>,
     cursor: usize,
-    focused: bool,
+    focus: Option<ListFocus<'_>>,
   ) {
+    let focused = focus.is_some();
     // Only materialise the rows that can be shown: a 20k-package list would
     // otherwise allocate 20k ListItems per frame.
     let visible = area.height.saturating_sub(2) as usize;
@@ -1572,6 +1709,17 @@ impl PackagePicker {
     let mut state = ListState::default();
     state.select(Some(cursor - skip));
     f.render_stateful_widget(list, area, &mut state);
+
+    if let Some(ListFocus { current, total }) = focus {
+      let row = (cursor - skip).saturating_sub(state.offset());
+      if cursor < total && row < visible && area.width > 2 {
+        a11y::cursor(area.x + 1, area.y + 1 + row as u16);
+      }
+      a11y::focus(title, || match current {
+        Some(name) => format!("{name}, {} of {total}", cursor + 1),
+        None => "empty".into(),
+      });
+    }
   }
 }
 
@@ -1593,25 +1741,52 @@ impl ConfigWidget for PackagePicker {
       [Constraint::Length(5), Constraint::Min(0)]
     );
 
-    let n_sel = self.package_manager.selected_len();
-    let n_avail = self.package_manager.available().len();
+    let pm = &self.package_manager;
+    let n_sel = pm.selected_len();
+    let n_avail = pm.available().len();
+    let speaking = a11y::speaking();
+    let selected_pane = self.pane == PickerPane::Selected;
+    let available_pane = self.pane == PickerPane::Available;
+    // The item under each cursor is only looked up for speech, and only for
+    // the pane that has focus.
+    let current_selected = (speaking && selected_pane)
+      .then(|| pm.selected().nth(self.selected_cursor).map(|i| pm.name(i)))
+      .flatten();
+    let current_available = (speaking && available_pane)
+      .then(|| {
+        pm.available()
+          .get(self.available_cursor)
+          .map(|&i| pm.name(i))
+      })
+      .flatten();
     self.render_list(
       f,
       vert_chunks_left[1],
       &format!("{} ({n_sel})", self.title_selected),
-      self.package_manager.selected(),
+      pm.selected(),
       self.selected_cursor,
-      self.pane == PickerPane::Selected,
+      selected_pane.then_some(ListFocus {
+        current: current_selected,
+        total: n_sel,
+      }),
     );
     self.search_bar.render(f, vert_chunks_right[0]);
     self.render_list(
       f,
       vert_chunks_right[1],
       &format!("{} ({n_avail})", self.title_available),
-      self.package_manager.available().iter().copied(),
+      pm.available().iter().copied(),
       self.available_cursor,
-      self.pane == PickerPane::Available,
+      available_pane.then_some(ListFocus {
+        current: current_available,
+        total: n_avail,
+      }),
     );
+    if self.pane == PickerPane::Search {
+      a11y::context(|c| {
+        let _ = write!(c, "{n_avail} available, {n_sel} selected");
+      });
+    }
     self.help_modal.render(f, area);
   }
 
@@ -1875,8 +2050,11 @@ impl<'a> LogBox<'a> {
           if stripped.trim().is_empty() {
             continue;
           }
-          let line = strip_log_prefix(&stripped);
-          self.push_line(line);
+          let record = split_log_prefix(&stripped);
+          if let Some((level, msg)) = record {
+            a11y::progress(level, msg);
+          }
+          self.push_line(log_line(&stripped, record));
         }
         _ => self.pending_line.push(ch),
       }
@@ -1885,22 +2063,31 @@ impl<'a> LogBox<'a> {
   }
 }
 
-/// Turn a log-file line into a display line for the Logs pane.
-///
-/// The logger writes `[ LEVEL ] HH:MM:SS message`; the file keeps that, but
-/// on screen only the message is shown so it reads like the pacman output
-/// around it. The level survives as colour: errors red, warnings yellow,
-/// debug/trace dim.
+#[cfg(test)]
 fn strip_log_prefix(line: &str) -> Line<'static> {
-  // "[ INFO ] 12:34:56 msg" -> level = "INFO", rest = "msg"
-  let parsed = line.strip_prefix("[ ").and_then(|r| {
+  log_line(line, split_log_prefix(line))
+}
+
+/// `"[ INFO ] 12:34:56 msg"` -> `("INFO", "msg")`; `None` for lines the
+/// logger did not write (pacman output, step footers).
+fn split_log_prefix(line: &str) -> Option<(&str, &str)> {
+  line.strip_prefix("[ ").and_then(|r| {
     let (level, rest) = r.split_once(" ] ")?;
     // 8-char timestamp followed by a space
     let msg = rest
       .get(9..)
       .filter(|_| rest.as_bytes().get(8) == Some(&b' '))?;
     Some((level.trim(), msg))
-  });
+  })
+}
+
+/// Turn a log-file line into a display line for the Logs pane.
+///
+/// The logger writes `[ LEVEL ] HH:MM:SS message`; the file keeps that, but
+/// on screen only the message is shown so it reads like the pacman output
+/// around it. The level survives as colour: errors red, warnings yellow,
+/// debug/trace dim.
+fn log_line(line: &str, parsed: Option<(&str, &str)>) -> Line<'static> {
   let (style, text) = match parsed {
     Some(("ERROR", msg)) => (
       Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -1953,6 +2140,20 @@ impl<'a> ConfigWidget for LogBox<'a> {
     };
     f.render_widget(Paragraph::new(visible).wrap(Wrap { trim: true }), log_area);
     f.render_widget(Paragraph::new(live.to_vec()), live_area);
+
+    // The newest progress row (download/install bar) or log line: spoken
+    // only as a heartbeat after a long silence, never as a stream.
+    a11y::busy(|| {
+      let live = self.live_rows.iter().rev().find(|r| !r.trim().is_empty());
+      match live {
+        Some(row) => row.trim().to_string(),
+        None => self
+          .line_buf
+          .back()
+          .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+          .unwrap_or_default(),
+      }
+    });
   }
 
   fn focus(&mut self) {
@@ -2271,6 +2472,172 @@ mod tests {
       .map(|c| c.symbol())
       .collect::<String>();
     assert!(!screen.contains("pkg-b"));
+  }
+
+  // --- screen-reader support -------------------------------------------------
+
+  use ratatui::{Terminal, backend::TestBackend, layout::Position};
+
+  /// Draw like the event loop does and return the parked cursor and the text
+  /// of the screen row it sits on.
+  fn draw_parked(w: u16, h: u16, render: impl FnOnce(&mut Frame)) -> (Position, String) {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term
+      .draw(|f| {
+        a11y::begin_frame();
+        render(f);
+      })
+      .unwrap();
+    a11y::end_frame(&mut term).unwrap();
+    let pos = term.get_cursor_position().unwrap();
+    let buf = term.backend().buffer();
+    let row = (0..w).map(|x| buf[(x, pos.y)].symbol()).collect::<String>();
+    (pos, row)
+  }
+
+  /// Draw a frame for the speech tests: collect the report, speak nothing.
+  fn draw_frame(w: u16, h: u16, render: impl FnOnce(&mut Frame)) {
+    let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+    term
+      .draw(|f| {
+        a11y::begin_frame();
+        render(f);
+      })
+      .unwrap();
+  }
+
+  #[test]
+  fn cursor_sits_on_the_selected_list_row_even_when_scrolled() {
+    let mut l = StrList::new("T", (0..50).map(|i| format!("item {i}")).collect());
+    l.focus();
+    for _ in 0..30 {
+      l.next_item();
+    }
+    let (pos, row) = draw_parked(20, 10, |f| l.render(f, f.area()));
+    assert_eq!(pos.x, 1);
+    assert!(row.contains("item 30"), "cursor row: {row:?}");
+  }
+
+  #[test]
+  fn cursor_sits_on_the_caret_of_a_text_field() {
+    let mut e = LineEditor::new("Name", None::<&str>);
+    e.focus();
+    for c in "abc".chars() {
+      e.handle_input(key(KeyCode::Char(c)));
+    }
+    e.handle_input(key(KeyCode::Left));
+    let mut term = Terminal::new(TestBackend::new(20, 6)).unwrap();
+    term
+      .draw(|f| {
+        a11y::begin_frame();
+        e.render(f, f.area());
+      })
+      .unwrap();
+    a11y::end_frame(&mut term).unwrap();
+    let pos = term.get_cursor_position().unwrap();
+    assert_eq!(term.backend().buffer()[pos].symbol(), "c");
+  }
+
+  #[test]
+  fn cursor_sits_on_the_selected_table_row_and_the_focused_button() {
+    let mut t = TableWidget::new(
+      "Drives",
+      vec![Constraint::Length(10), Constraint::Length(10)],
+      vec!["Device".into(), "Size".into()],
+      vec![
+        vec!["sda".into(), "1G".into()],
+        vec!["sdb".into(), "2G".into()],
+        vec!["sdc".into(), "3G".into()],
+      ],
+    );
+    t.focus();
+    t.selected_row = Some(2);
+    let (_, row) = draw_parked(30, 10, |f| t.render(f, f.area()));
+    assert!(row.contains("sdc"), "cursor row: {row:?}");
+
+    let mut b = Button::new("Done");
+    b.focus();
+    let mut term = Terminal::new(TestBackend::new(20, 1)).unwrap();
+    term
+      .draw(|f| {
+        a11y::begin_frame();
+        b.render(f, f.area());
+      })
+      .unwrap();
+    a11y::end_frame(&mut term).unwrap();
+    let pos = term.get_cursor_position().unwrap();
+    assert_eq!(term.backend().buffer()[pos].symbol(), "D");
+  }
+
+  #[test]
+  fn speech_names_the_item_its_position_and_the_description() {
+    a11y::enable_for_tests();
+    let mut l = StrList::new("Main Menu", vec!["Base System".into(), "Timezone".into()]);
+    l.focus();
+    let render = |l: &StrList, about: &'static str| {
+      draw_frame(60, 12, |f| {
+        let [left, right] =
+          Layout::horizontal([Constraint::Length(20), Constraint::Min(0)]).areas(f.area());
+        l.render(f, left);
+        InfoBox::new("About", vec![Line::from(about)]).render(f, right);
+      });
+      a11y::utterance_for_tests()
+    };
+    assert_eq!(
+      render(&l, "Pick a base."),
+      "Main Menu. Base System, 1 of 2. About. Pick a base."
+    );
+    assert_eq!(render(&l, "Pick a base."), "", "idle redraw is silent");
+    l.next_item();
+    assert_eq!(
+      render(&l, "Pick a zone."),
+      "Timezone, 2 of 2. About. Pick a zone."
+    );
+  }
+
+  #[test]
+  fn speech_never_reveals_a_secret_field() {
+    a11y::enable_for_tests();
+    let mut e = LineEditor::new("Set Root Password", None::<&str>).secret(true);
+    e.focus();
+    let mut said = String::new();
+    for c in "hunter2".chars() {
+      e.handle_input(key(KeyCode::Char(c)));
+      draw_frame(30, 6, |f| e.render(f, f.area()));
+      said.push_str(&a11y::utterance_for_tests());
+      said.push(' ');
+    }
+    assert!(!said.contains("hunter") && !said.contains('2'), "{said}");
+    assert!(said.contains("star"));
+  }
+
+  #[test]
+  fn install_log_records_become_progress_but_raw_output_does_not() {
+    a11y::enable_for_tests();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dory.log");
+    std::fs::write(&path, "").unwrap();
+    let mut lb = LogBox::new("Logs".into());
+    lb.open_log(&path).unwrap();
+    std::fs::OpenOptions::new()
+      .append(true)
+      .open(&path)
+      .unwrap()
+      .write_all(
+        b"[ INFO ] 10:00:00 Getting fastest mirrors\n\
+          (12/40) installing linux  [####] 30%\n\
+          [ DEBUG ] 10:00:01 noise\n\
+          [ ERROR ] 10:00:02 Package installation failed with exit code 1\n",
+      )
+      .unwrap();
+    lb.poll_log().unwrap();
+    assert_eq!(
+      a11y::queued_for_tests(),
+      vec![
+        "Error: Package installation failed with exit code 1".to_string(),
+        "Getting fastest mirrors".to_string(),
+      ]
+    );
   }
 
   #[test]
