@@ -519,6 +519,8 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
             match kernel {
                 "linux" => packages.push("nvidia-open"),
                 "linux-lts" => packages.push("nvidia-open-lts"),
+                "linux-aegis-offensive" => packages.push("linux-aegis-offensive-nvidia-open"),
+                "linux-aegis-hardened" => packages.push("linux-aegis-hardened-nvidia-open"),
                 _ => packages.push("nvidia-open-dkms"),
             }
             packages.push("nvidia-settings");
@@ -532,6 +534,8 @@ pub fn gpu_check(kernel: &str) -> Vec<&'static str> {
             match kernel {
                 "linux" => packages.push("nvidia-open"),
                 "linux-lts" => packages.push("nvidia-open-lts"),
+                "linux-aegis-offensive" => packages.push("linux-aegis-offensive-nvidia-open"),
+                "linux-aegis-hardened" => packages.push("linux-aegis-hardened-nvidia-open"),
                 _ => packages.push("nvidia-open-dkms"),
             }
             packages.push("nvidia-settings");
