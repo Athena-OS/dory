@@ -38,6 +38,10 @@ use crate::{
 };
 
 const HIGHLIGHT: Option<(Color, Modifier)> = Some((Color::Yellow, Modifier::BOLD));
+/// Required by `mokutil -P` (see `RootPassword::mkpasswd`).
+pub const ROOT_HASH_METHOD: &str = "sha512crypt";
+/// Modern default for user accounts; nothing else needs to parse these.
+pub const USER_HASH_METHOD: &str = "yescrypt";
 const KEY: Option<(Color, Modifier)> = Some((Color::Yellow, Modifier::BOLD));
 
 /// One styled line as consumed by [`styled_block`]: `(style, text)` spans.
@@ -1381,10 +1385,15 @@ impl RootPassword {
       Box::new(ib) as Box<dyn ConfigWidget>
     })
   }
-  /// Hash a password with yescrypt via `mkpasswd` (stdin, never argv).
-  pub fn mkpasswd(passwd: &str) -> anyhow::Result<String> {
+  /// Hash a password via `mkpasswd` (stdin, never argv).
+  ///
+  /// `method` is a crypt(5) method name. Root MUST use `sha512crypt`: at the
+  /// end of the install `mokutil -P` reads root's hash from /etc/shadow to
+  /// protect MokManager, and mokutil only understands md5/sha256/sha512crypt
+  /// (a yescrypt `$y$` hash fails with "Failed to get root password hash").
+  pub fn mkpasswd(passwd: &str, method: &str) -> anyhow::Result<String> {
     let mut child = Command::new("mkpasswd")
-      .arg("--method=yescrypt")
+      .arg(format!("--method={method}"))
       .arg("--stdin")
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
@@ -1510,7 +1519,7 @@ impl Page for RootPassword {
             self.input.error("Passwords do not match");
             Signal::Wait // Passwords do not match
           } else {
-            match Self::mkpasswd(&passwd) {
+            match Self::mkpasswd(&passwd, ROOT_HASH_METHOD) {
               Ok(hashed) => {
                 installer.root_passwd_hash = Some(hashed);
                 Signal::Pop
@@ -2344,6 +2353,11 @@ const TICKER_MESSAGES: &[&str] = &[
   "Is it D3vil0p3r or... Luc1f3r?",
 ];
 
+/// Side file where the backend publishes the still-changing progress rows.
+fn live_file_path(log_file_path: &Path) -> PathBuf {
+  log_file_path.with_extension("live")
+}
+
 pub struct InstallProgress<'a> {
   steps: InstallSteps<'a>,
   log_box: LogBox<'a>,
@@ -2384,8 +2398,10 @@ impl<'a> InstallProgress<'a> {
 
     // Each install starts with an empty log file.
     std::fs::write(&log_path, b"")?;
+    let _ = std::fs::remove_file(live_file_path(&log_path));
     let mut log_box = LogBox::new("Logs".into());
     log_box.open_log(log_path.clone())?;
+    log_box.watch_live(live_file_path(&log_path));
 
     Ok(Self {
       steps,
@@ -2415,12 +2431,23 @@ impl<'a> InstallProgress<'a> {
       .append(true)
       .create(true)
       .open(log_file_path)?;
+    // Width of the log pane (70% of the screen minus borders): the backend
+    // sizes the package manager's pty to it so progress bars fit.
+    let cols = ratatui::crossterm::terminal::size()
+      .map(|(w, _)| w)
+      .unwrap_or(120);
+    let log_cols = (u32::from(cols) * 70 / 100).saturating_sub(4).max(40);
     let mut install = Command::new(exe);
     install
       .arg("--system-file")
       .arg(system_cfg_path)
       .arg("--drives-file")
       .arg(disk_cfg_path)
+      .env(
+        core::internal::install::LIVE_FILE_ENV,
+        live_file_path(log_file_path),
+      )
+      .env(core::internal::install::PTY_COLS_ENV, log_cols.to_string())
       .stdout(Stdio::from(log.try_clone()?))
       .stderr(Stdio::from(log));
     Ok(vec![(

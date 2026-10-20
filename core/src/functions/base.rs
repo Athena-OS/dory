@@ -117,6 +117,11 @@ pub fn install_packages(mut packages: Vec<String>) -> i32 {
     );
   }
 
+  // The kernel packages' hooks (athena-uki) build UKIs with ukify, which
+  // reads /etc/kernel/cmdline. Everything the cmdline needs is known now, so
+  // write it before the kernels are installed instead of failing the hook.
+  write_kernel_cmdline_file(&generate_kernel_cmdline());
+
   let code = install(PackageManager::Pacman, &packages);
   if code != 0 {
     error!("Package installation failed with exit code {code}");
@@ -377,6 +382,8 @@ pub fn configure_bootloader_systemd_boot_shim(esp: &str) {
 
   ensure_pcr_keys_in_chroot();
 
+  // Same content as written before the package install; kept in sync here in
+  // case anything changed in between (e.g. TPM keys).
   let cmdline = generate_kernel_cmdline();
   write_kernel_cmdline_file(&cmdline);
 

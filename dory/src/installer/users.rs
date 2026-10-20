@@ -588,7 +588,7 @@ impl AddUser {
       .unwrap_or(false);
 
     // hash
-    let hashed = super::RootPassword::mkpasswd(&pass)?;
+    let hashed = super::RootPassword::mkpasswd(&pass, super::USER_HASH_METHOD)?;
 
     // groups
     let mut groups = vec![];
@@ -1313,7 +1313,7 @@ impl AlterUser {
                 self.pass_confirm.focus();
                 return Signal::Wait;
               }
-              let hashed = match super::RootPassword::mkpasswd(pass) {
+              let hashed = match super::RootPassword::mkpasswd(pass, super::USER_HASH_METHOD) {
                 Ok(h) => h,
                 Err(e) => {
                   return Signal::Error(anyhow::anyhow!("Failed to hash password: {e}"));

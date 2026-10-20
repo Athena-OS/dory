@@ -311,11 +311,13 @@ dependencies = [
 name = "core"
 version = "1.0.0"
 dependencies = [
+ "libc",
  "log",
  "regex",
  "serde",
  "serde_json",
  "shared",
+ "tempfile",
 ]
 
 [[package]]

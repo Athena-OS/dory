@@ -1756,6 +1756,8 @@ pub struct LogBox<'a> {
   log_path: Option<PathBuf>,        // path to the log file
   pending_bytes: Vec<u8>,           // bytes that didn't decode to valid UTF-8 yet
   pending_line: String,             // decoded but not yet newline-terminated text
+  live_path: Option<PathBuf>,       // file with rows still being redrawn (progress bars)
+  live_rows: Vec<String>,           // last contents of `live_path`
 }
 
 impl<'a> LogBox<'a> {
@@ -1771,7 +1773,24 @@ impl<'a> LogBox<'a> {
       log_path: None,
       pending_bytes: Vec::new(),
       pending_line: String::new(),
+      live_path: None,
+      live_rows: Vec::new(),
     }
+  }
+
+  /// Also show the rows the backend is still redrawing (download progress),
+  /// published atomically in `path`. They are rendered below the log lines
+  /// and disappear with the file.
+  pub fn watch_live(&mut self, path: PathBuf) {
+    self.live_path = Some(path);
+  }
+
+  fn poll_live(&mut self) {
+    let Some(path) = &self.live_path else { return };
+    self.live_rows = match std::fs::read_to_string(path) {
+      Ok(s) => s.lines().map(str::to_string).collect(),
+      Err(_) => Vec::new(),
+    };
   }
 
   /// Start tailing `path` from its current end. The file is opened read-only
@@ -1818,6 +1837,7 @@ impl<'a> LogBox<'a> {
   /// - Preserves ANSI colors by feeding raw text to `IntoText`.
   /// - Detects truncation/rotation and resets cleanly.
   pub fn poll_log(&mut self) -> anyhow::Result<()> {
+    self.poll_live();
     self.reopen_if_replaced();
     let Some(f) = self.reader.as_mut() else {
       return Ok(());
@@ -1878,15 +1898,24 @@ impl<'a> ConfigWidget for LogBox<'a> {
   }
 
   fn render(&self, f: &mut Frame, area: Rect) {
-    // Show the last N lines that fit in the box
+    // Live progress rows sit at the bottom; the newest log lines fill the rest.
     let rows = area.height.saturating_sub(2) as usize;
-    let start = self.line_buf.len().saturating_sub(rows);
-    let visible: Vec<Line> = self.line_buf.iter().skip(start).cloned().collect();
+    let live: Vec<Line> = self
+      .live_rows
+      .iter()
+      .filter(|r| !r.trim().is_empty())
+      .map(|r| Line::from(Span::styled(r.clone(), Style::default().fg(Color::Cyan))))
+      .collect();
+    let live = &live[live.len().saturating_sub(rows)..];
+    let log_rows = rows.saturating_sub(live.len());
+    let start = self.line_buf.len().saturating_sub(log_rows);
+    let mut visible: Vec<Line> = self.line_buf.iter().skip(start).cloned().collect();
+    visible.extend_from_slice(live);
 
     let paragraph = Paragraph::new(visible)
       .block(
         Block::default()
-          .title(self.title.clone())
+          .title(self.title.as_str())
           .borders(Borders::ALL),
       )
       .wrap(Wrap { trim: true });
@@ -2144,6 +2173,52 @@ mod tests {
     lb.poll_log().unwrap();
     assert_eq!(lb.line_buf.len(), 3);
     assert_eq!(lb.line_buf.back().unwrap().spans[0].content, "fresh");
+  }
+
+  #[test]
+  fn log_box_renders_live_rows_below_log() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("dory.log");
+    let live = dir.path().join("dory.live");
+    std::fs::write(&log, "").unwrap();
+    let mut lb = LogBox::new("Logs".into());
+    lb.open_log(&log).unwrap();
+    lb.watch_live(live.clone());
+    std::fs::OpenOptions::new()
+      .append(true)
+      .open(&log)
+      .unwrap()
+      .write_all(b"[ INFO ] done pkg-a\n")
+      .unwrap();
+    std::fs::write(&live, "pkg-b  40% [####      ]\npkg-c  10% [#         ]").unwrap();
+    lb.poll_log().unwrap();
+
+    let mut term = Terminal::new(TestBackend::new(40, 6)).unwrap();
+    term.draw(|f| lb.render(f, f.area())).unwrap();
+    let screen = term
+      .backend()
+      .buffer()
+      .content()
+      .iter()
+      .map(|c| c.symbol())
+      .collect::<String>();
+    assert!(screen.contains("done pkg-a"));
+    assert!(screen.contains("pkg-b  40%"));
+    assert!(screen.contains("pkg-c  10%"));
+
+    // Live file removed at the end of the install: rows disappear.
+    std::fs::remove_file(&live).unwrap();
+    lb.poll_log().unwrap();
+    term.draw(|f| lb.render(f, f.area())).unwrap();
+    let screen = term
+      .backend()
+      .buffer()
+      .content()
+      .iter()
+      .map(|c| c.symbol())
+      .collect::<String>();
+    assert!(!screen.contains("pkg-b"));
   }
 
   #[test]

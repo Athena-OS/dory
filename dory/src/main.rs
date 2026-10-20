@@ -25,7 +25,7 @@ use ratatui::{
 use shared::{
   args::{Cli, ConfigInput},
   exec::check_if_root,
-  logging,
+  logging::{self, LogMode},
 };
 use std::time::{Duration, Instant};
 
@@ -150,8 +150,17 @@ fn main() -> anyhow::Result<()> {
 
   // check_if_root must come before logging::init so the error is printed plainly.
   check_if_root();
-  // Echo the log to stderr only in CLI mode: in the TUI it would draw over the frame.
-  logging::init(cli.verbose, LOG_PATH, cli_mode);
+  // Spawned by the TUI: append to the log the TUI is tailing. Plain CLI: fresh
+  // log echoed to stderr. TUI itself: fresh log, nothing on stderr (it would
+  // draw over the frame).
+  let log_mode = if env::var_os(core::internal::install::LIVE_FILE_ENV).is_some() {
+    LogMode::Append
+  } else if cli_mode {
+    LogMode::FreshWithStderr
+  } else {
+    LogMode::Fresh
+  };
+  logging::init(cli.verbose, LOG_PATH, log_mode);
   debug!("Logger initialized. Verbose: {}", cli.verbose);
 
   if cli_mode {

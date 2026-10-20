@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2024"
 
 [dependencies]
+libc = "0.2"
 log.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -13,3 +14,6 @@ shared = { path = "../shared" }
 [lib]
 name = "core"
 path = "src/lib.rs"
+
+[dev-dependencies]
+tempfile = "3"

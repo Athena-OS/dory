@@ -1,14 +1,25 @@
+use crate::internal::live::LiveScreen;
 use log::{debug, error, info};
 use regex::Regex;
 use shared::args::PackageManager;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, IsTerminal, Read, Write};
+use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::LazyLock;
-use std::sync::mpsc::{self, Sender};
-use std::thread;
+use std::time::{Duration, Instant};
 
 const MAX_RETRIES: u32 = 15;
+
+/// Environment variable set by the TUI: path of the file that receives the
+/// live (still-changing) progress rows, rewritten atomically.
+pub const LIVE_FILE_ENV: &str = "DORY_LIVE_FILE";
+/// Environment variable set by the TUI: width of the log pane, used as the
+/// pty width so pacman sizes its progress bars to fit.
+pub const PTY_COLS_ENV: &str = "DORY_PTY_COLS";
+/// Minimum interval between rewrites of the live file.
+const LIVE_REFRESH: Duration = Duration::from_millis(100);
 
 /// Run the package manager, streaming its output to the log.
 ///
@@ -19,7 +30,7 @@ pub fn install(pkgmanager: PackageManager, pkgs: &[String]) -> i32 {
   let mut last_exit = 0;
 
   for attempt in 1..=MAX_RETRIES {
-    let (name, mut child) = match spawn(pkgmanager, pkgs) {
+    let (name, mut child, master) = match spawn(pkgmanager, pkgs) {
       Ok(v) => v,
       Err(e) => {
         error!("Failed to start package manager: {e}");
@@ -27,25 +38,41 @@ pub fn install(pkgmanager: PackageManager, pkgs: &[String]) -> i32 {
       }
     };
 
-    // Both pipes feed a single channel so the mirror-handling below runs on
-    // one thread: two reader threads editing the same mirrorlist raced.
-    let (tx, rx) = mpsc::channel::<String>();
-    let t1 = child.stdout.take().map(|p| spawn_reader(p, tx.clone()));
-    let t2 = child.stderr.take().map(|p| spawn_reader(p, tx));
-    // (the original `tx` was moved into t2; if stderr was absent it drops here)
-
+    // Everything the package manager prints comes through the pty master.
+    // Finished lines go to the log; lines that are still being redrawn
+    // (progress bars) go to the terminal or to the live file.
     let mut retry = false;
-    for line in rx {
+    let mut output = PtyOutput::new();
+    let mut buf = [0u8; 8192];
+    let mut master: File = master.into();
+    loop {
+      let n = match master.read(&mut buf) {
+        Ok(0) => break,
+        Ok(n) => n,
+        // EIO is how a pty reports that the child closed its side.
+        Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
+        Err(e) => {
+          error!("read error from package manager pty: {e}");
+          break;
+        }
+      };
+      for line in output.feed(&buf[..n]) {
+        info!("{line}");
+        if let Some(pm) = name
+          && handle_mirror_problem(&line, pm)
+        {
+          // Do NOT break: keep draining so the child can exit.
+          retry = true;
+        }
+      }
+    }
+    for line in output.finish() {
       info!("{line}");
       if let Some(pm) = name
         && handle_mirror_problem(&line, pm)
       {
-        // Do NOT break: keep draining the pipe so the child can exit.
         retry = true;
       }
-    }
-    for t in [t1, t2].into_iter().flatten() {
-      let _ = t.join();
     }
 
     let status = child.wait().expect("Failed to wait on package manager");
@@ -63,9 +90,14 @@ pub fn install(pkgmanager: PackageManager, pkgs: &[String]) -> i32 {
   last_exit
 }
 
-/// Spawn the package manager. Returns the name used for mirrorlist handling
-/// (`Some` only for the Arch tools).
-fn spawn(pkgmanager: PackageManager, pkgs: &[String]) -> io::Result<(Option<&'static str>, Child)> {
+/// Spawn the package manager under a pseudo-terminal so it behaves as on a
+/// console: line-flushed output and real progress bars. Returns the name used
+/// for mirrorlist handling (`Some` only for the Arch tools), the child and the
+/// pty master to read from.
+fn spawn(
+  pkgmanager: PackageManager,
+  pkgs: &[String],
+) -> io::Result<(Option<&'static str>, Child, OwnedFd)> {
   let mut cmd = match pkgmanager {
     PackageManager::Pacstrap => {
       let mut c = Command::new("pacstrap");
@@ -95,41 +127,111 @@ fn spawn(pkgmanager: PackageManager, pkgs: &[String]) -> io::Result<(Option<&'st
     PackageManager::Nix => None,
   };
   debug!("Spawning {cmd:?}");
-  let child = cmd
+
+  let cols: u16 = std::env::var(PTY_COLS_ENV)
+    .ok()
+    .and_then(|c| c.parse().ok())
+    .unwrap_or(100);
+  let (master, slave) = openpty(cols.max(40), 50)?;
+  // stdin stays /dev/null: an unexpected prompt must fail, not wait forever.
+  cmd
     .stdin(Stdio::null())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()?;
-  Ok((name, child))
+    .stdout(Stdio::from(slave.try_clone()?))
+    .stderr(Stdio::from(slave));
+  // SAFETY: only async-signal-safe calls between fork and exec.
+  unsafe {
+    cmd.pre_exec(|| {
+      libc::setsid();
+      // Make the pty the controlling terminal so the child sees a real tty.
+      libc::ioctl(1, libc::TIOCSCTTY as _, 0);
+      Ok(())
+    });
+  }
+  let child = cmd.spawn()?;
+  Ok((name, child, master))
 }
 
-fn spawn_reader<R: io::Read + Send + 'static>(
-  pipe: R,
-  tx: Sender<String>,
-) -> thread::JoinHandle<()> {
-  thread::spawn(move || {
-    let mut reader = BufReader::new(pipe);
-    let mut buf: Vec<u8> = Vec::with_capacity(16 * 1024);
-    loop {
-      buf.clear();
-      match reader.read_until(b'\n', &mut buf) {
-        Ok(0) => break,
-        Ok(_) => {
-          let line = String::from_utf8_lossy(&buf);
-          if tx
-            .send(line.trim_end_matches(['\r', '\n']).to_string())
-            .is_err()
-          {
-            break;
-          }
-        }
-        Err(e) => {
-          error!("read stream error: {e}");
-          break;
-        }
-      }
+/// Allocate a pseudo-terminal pair with the given size.
+fn openpty(cols: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {
+  let mut master = 0;
+  let mut slave = 0;
+  let ws = libc::winsize {
+    ws_row: rows,
+    ws_col: cols,
+    ws_xpixel: 0,
+    ws_ypixel: 0,
+  };
+  // SAFETY: valid out-pointers; openpty fills them on success.
+  let rc = unsafe {
+    libc::openpty(
+      &mut master,
+      &mut slave,
+      std::ptr::null_mut(),
+      std::ptr::null_mut(),
+      &ws,
+    )
+  };
+  if rc != 0 {
+    return Err(io::Error::last_os_error());
+  }
+  // SAFETY: both descriptors were just returned by openpty and are owned here.
+  Ok(unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) })
+}
+
+/// Routes pty output: finished lines come back to the caller for logging,
+/// the still-changing part is either passed through to the user's terminal
+/// (plain CLI run) or written to the live file for the TUI to display.
+struct PtyOutput {
+  screen: LiveScreen,
+  live_file: Option<String>,
+  last_live_write: Instant,
+  passthrough: bool,
+}
+
+impl PtyOutput {
+  fn new() -> Self {
+    let live_file = std::env::var(LIVE_FILE_ENV).ok().filter(|p| !p.is_empty());
+    Self {
+      screen: LiveScreen::new(),
+      passthrough: live_file.is_none() && io::stdout().is_terminal(),
+      live_file,
+      last_live_write: Instant::now() - LIVE_REFRESH,
     }
-  })
+  }
+
+  fn feed(&mut self, bytes: &[u8]) -> Vec<String> {
+    if self.passthrough {
+      let mut out = io::stdout().lock();
+      let _ = out.write_all(bytes);
+      let _ = out.flush();
+    }
+    let finished = self.screen.feed(bytes);
+    if self.live_file.is_some() && self.last_live_write.elapsed() >= LIVE_REFRESH {
+      self.write_live();
+    }
+    finished
+  }
+
+  fn finish(&mut self) -> Vec<String> {
+    let finished = self.screen.finish();
+    if let Some(path) = &self.live_file {
+      let _ = fs::remove_file(path);
+    }
+    finished
+  }
+
+  /// Atomically replace the live file with the current live rows.
+  fn write_live(&mut self) {
+    let Some(path) = &self.live_file else { return };
+    let tmp = format!("{path}.tmp");
+    let content = self.screen.live_rows().join("\n");
+    if fs::write(&tmp, content)
+      .and_then(|()| fs::rename(&tmp, path))
+      .is_ok()
+    {
+      self.last_live_write = Instant::now();
+    }
+  }
 }
 
 /// Inspect one line of pacman output; demote the responsible mirror if it
