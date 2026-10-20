@@ -2456,6 +2456,10 @@ impl<'a> InstallProgress<'a> {
 }
 
 impl InstallProgress<'_> {
+  /// Width of the Install Steps box: its longest line plus borders. The Logs
+  /// box takes all the remaining width.
+  const STEPS_WIDTH: u16 = 32;
+
   /// Page layout: [steps | logs] above the ticker. Shared by `render` and the
   /// pty-width calculation so the two can never disagree.
   fn layout(area: Rect) -> (Rect, Rect, Rect) {
@@ -2463,7 +2467,7 @@ impl InstallProgress<'_> {
     let hor_chunks = split_hor!(
       chunks[0],
       1,
-      [Constraint::Percentage(30), Constraint::Percentage(70)]
+      [Constraint::Length(Self::STEPS_WIDTH), Constraint::Min(0)]
     );
     (hor_chunks[0], hor_chunks[1], chunks[1])
   }
