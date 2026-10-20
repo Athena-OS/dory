@@ -1,9 +1,10 @@
 //! A tiny line-oriented terminal model for package-manager output.
 //!
-//! pacman draws progress bars with `\r` and, for parallel downloads, moves the
-//! cursor up with `ESC[nA` to redraw several lines. Fed the raw pty bytes, this
-//! model keeps a window of rows that may still be rewritten (the "live" area)
-//! and hands out rows that scrolled past that window as finished log lines.
+//! pacman prints one line per download, then redraws each bar by jumping to
+//! its line with `ESC[nF` / `ESC[nE` (cursor previous/next line, column 0)
+//! and ending the bar with `\r`. Fed the raw pty bytes, this model keeps a
+//! window of rows that may still be rewritten (the "live" area) and hands out
+//! rows that scrolled past that window as finished log lines.
 
 /// Rows above the cursor that pacman may still come back to. pacman never
 /// moves up further than its parallel-download block, which is far smaller.
@@ -56,8 +57,20 @@ impl LiveScreen {
         .unwrap_or(1)
         .max(1);
       match ch {
+        // CUU / CUD: up/down, column unchanged
         'A' => self.cursor = self.cursor.saturating_sub(n).max(self.finalized),
         'B' => self.cursor += n,
+        // CPL / CNL: previous/next line, column 0 (what pacman uses)
+        'F' => {
+          self.cursor = self.cursor.saturating_sub(n).max(self.finalized);
+          self.col = 0;
+        }
+        'E' => {
+          self.cursor += n;
+          self.col = 0;
+        }
+        // CHA: absolute column (1-based)
+        'G' => self.col = n - 1,
         'K' => {
           self.ensure_row();
           self.rows[self.cursor].truncate(self.col);
@@ -143,6 +156,29 @@ mod tests {
     s.feed(b"a 10%\r\nb 10%\r\n\x1b[2Aa 90%\x1b[K\r\nb 20%\x1b[K\r\n");
     assert_eq!(s.live_rows(), vec!["a 90%", "b 20%"]);
     assert_eq!(s.finish(), vec!["a 90%", "b 20%"]);
+  }
+
+  #[test]
+  fn pacman_style_multibar_redraw() {
+    // Exactly what pacman does: name lines, then jump back with CPL and
+    // draw the bar ending in '\r'; "move_end" uses CNL to the empty row.
+    let mut s = LiveScreen::new();
+    s.feed(b" athena\n core\n");
+    s.feed(b"\x1b[2F athena   120.0 KiB  1.2 MiB/s 00:00 [###] 100%\r");
+    s.feed(b"\x1b[1E core      10.0 KiB  0.5 MiB/s 00:01 [#--]  33%\r");
+    s.feed(b"\x1b[1E"); // console_cursor_move_end
+    s.feed(b" extra\n");
+    assert_eq!(
+      s.live_rows(),
+      vec![
+        " athena   120.0 KiB  1.2 MiB/s 00:00 [###] 100%",
+        " core      10.0 KiB  0.5 MiB/s 00:01 [#--]  33%",
+        " extra",
+      ]
+    );
+    // "is up to date" replaces a line and erases the leftovers
+    s.feed(b"\x1b[1F extra is up to date\x1b[K");
+    assert_eq!(s.live_rows()[2], " extra is up to date");
   }
 
   #[test]
