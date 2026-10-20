@@ -7,15 +7,53 @@ use crate::{
     widget::{Button, ConfigWidget, HelpModal, LineEditor, StrList, TableWidget, WidgetBox},
 };
 
+/// Names that already exist in a fresh Arch system (or are otherwise
+/// unusable); `useradd` would fail on them half-way through the install.
+const RESERVED_USERNAMES: &[&str] = &[
+    "root", "bin", "daemon", "mail", "ftp", "http", "nobody", "dbus", "systemd-coredump",
+    "systemd-journal-remote", "systemd-network", "systemd-oom", "systemd-resolve", "systemd-timesync",
+    "polkitd", "avahi", "colord", "cups", "geoclue", "git", "gdm", "sddm", "lightdm", "tss", "uuidd",
+    "rtkit", "usbmux", "nm-openvpn", "docker", "games", "audit", "named", "ntp", "nbd", "dhcpcd",
+];
+
+/// Valid POSIX/`useradd` login name: starts with a lowercase letter or `_`,
+/// then lowercase letters, digits, `_` or `-`, at most 32 characters.
 fn normalize_and_validate_username(raw: &str) -> Result<String, &'static str> {
     let s = raw.trim().to_lowercase();
     if s.is_empty() {
         return Err("Username cannot be empty");
     }
-    if !s.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err("Special characters are not allowed (letters and digits only)");
+    if s.len() > 32 {
+        return Err("Username must be at most 32 characters");
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap_or(' ');
+    if !(first.is_ascii_lowercase() || first == '_') {
+        return Err("Username must start with a letter or underscore");
+    }
+    if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
+        return Err("Only lowercase letters, digits, '_' and '-' are allowed");
+    }
+    if RESERVED_USERNAMES.contains(&s.as_str()) {
+        return Err("This name is reserved by the system");
     }
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_and_validate_username as v;
+
+    #[test]
+    fn usernames() {
+        assert_eq!(v("Alice").unwrap(), "alice");
+        assert_eq!(v("_svc-1").unwrap(), "_svc-1");
+        assert!(v("").is_err());
+        assert!(v("1abc").is_err());
+        assert!(v("al ice").is_err());
+        assert!(v("root").is_err());
+        assert!(v("a".repeat(33).as_str()).is_err());
+    }
 }
 
 fn default_shell() -> String {
@@ -288,55 +326,6 @@ impl Page for UserAccounts {
         }
     }
 
-    fn get_help_content(&self) -> (String, Vec<Line<'_>>) {
-        let help_content = styled_block(vec![
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "↑/↓, j/k",
-                ),
-                (None, " - Navigate user list"),
-            ],
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "Enter, →, l",
-                ),
-                (None, " - Add new user or edit selected user"),
-            ],
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "Tab",
-                ),
-                (None, " - Switch between user list and buttons"),
-            ],
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "Esc, q, ←, h",
-                ),
-                (None, " - Return to main menu"),
-            ],
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "?",
-                ),
-                (None, " - Show this help"),
-            ],
-            vec![(None, "")],
-            vec![(None, "Create user accounts for your system.")],
-            vec![
-                (
-                    None,
-                    "Select 'Add a new user' to create accounts, or select",
-                ),
-            ],
-            vec![(None, "an existing user to modify their settings.")],
-        ]);
-        ("User Accounts".to_string(), help_content)
-    }
 }
 
 /* ===========================
@@ -555,7 +544,7 @@ impl AddUser {
             .unwrap_or(false);
 
         // hash
-        let hashed = super::RootPassword::mkpasswd(pass)?;
+        let hashed = super::RootPassword::mkpasswd(&pass)?;
 
         // groups
         let mut groups = vec![];
@@ -830,41 +819,6 @@ impl Page for AddUser {
         }
     }
 
-    fn get_help_content(&self) -> (String, Vec<Line<'_>>) {
-        let help_content = styled_block(vec![
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "Tab / Shift+Tab",
-                ),
-                (None, " - Move between fields"),
-            ],
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "↑/↓, j/k",
-                ),
-                (None, " - Navigate shell/sudo list"),
-            ],
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "Enter",
-                ),
-                (None, " - Confirm / finalize new user"),
-            ],
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "Esc",
-                ),
-                (None, " - Cancel and return"),
-            ],
-            vec![(None, "")],
-            vec![(None, "Create a new user account and choose sudo.")],
-        ]);
-        ("Add User".to_string(), help_content)
-    }
 }
 
 /* ===========================
@@ -1296,7 +1250,7 @@ impl AlterUser {
                                 self.pass_confirm.focus();
                                 return Signal::Wait;
                             }
-                            let hashed = match super::RootPassword::mkpasswd(pass.to_string()) {
+                            let hashed = match super::RootPassword::mkpasswd(pass) {
                                 Ok(h) => h,
                                 Err(e) => {
                                     return Signal::Error(anyhow::anyhow!(
@@ -1462,44 +1416,4 @@ impl Page for AlterUser {
         }
     }
 
-    fn get_help_content(&self) -> (String, Vec<Line<'_>>) {
-        let help_content = styled_block(vec![
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "↑/↓, j/k",
-                ),
-                (None, " - Navigate options / lists"),
-            ],
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "Enter, →, l",
-                ),
-                (None, " - Select option / apply change"),
-            ],
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "Tab",
-                ),
-                (None, " - Switch between password fields"),
-            ],
-            vec![
-                (
-                    Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)),
-                    "Esc, q, ←, h",
-                ),
-                (None, " - Go back / cancel edit"),
-            ],
-            vec![(None, "")],
-            vec![
-                (
-                    None,
-                    "Modify username, password, shell, sudo (wheel), or delete.",
-                ),
-            ],
-        ]);
-        ("Alter User".to_string(), help_content)
-    }
 }

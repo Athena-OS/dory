@@ -1,391 +1,267 @@
 use log::{debug, error, info};
 use regex::Regex;
-use shared::args::{InstallMode, PackageManager};
-use shared::exec;
+use shared::args::PackageManager;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Child, Command, Stdio};
+use std::sync::LazyLock;
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 
-pub fn install(
-    pkgmanager: PackageManager,
-    pkgs: Vec<String>,
-    mode: Option<InstallMode>, // Arch: pass None; Fedora: Some(…)
-) -> i32 {
-    let mode = mode.unwrap_or(InstallMode::Install);
-    // retry loop is meaningful for Arch; Fedora will run once (retry never set)
-    let mut retry = Arc::new(Mutex::new(true));
-    let mut retry_counter = 0;
+const MAX_RETRIES: u32 = 15;
+
+/// Run the package manager, streaming its output to the log.
+///
+/// For pacstrap/pacman, mirror and keyring failures are detected in the
+/// output, the offending mirror is demoted in the relevant mirrorlist and the
+/// command is retried (up to `MAX_RETRIES` times). Returns the last exit code.
+pub fn install(pkgmanager: PackageManager, pkgs: &[String]) -> i32 {
     let mut last_exit = 0;
 
-    while *retry.lock().unwrap() && retry_counter < 15 {
-        // reset flag for this iteration
-        retry = Arc::new(Mutex::new(false));
-
-        // placeholder child, replaced in match arms
-        let mut child = Command::new("true")
-            .spawn()
-            .expect("Failed to initialize dummy command");
-
-        // Arch arms set this to Some("pacstrap"/"pacman"), Fedora leaves it None
-        let mut pkgmanager_name: Option<String> = None;
-
-        match pkgmanager {
-            // ---------- ARCH ----------
-            PackageManager::Pacstrap => {
-                pkgmanager_name = Some("pacstrap".to_string());
-                child = Command::new("pacstrap")
-                    .arg("/mnt")
-                    .args(&pkgs)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to start pacstrap");
-            }
-            PackageManager::Pacman => {
-                pkgmanager_name = Some("pacman".to_string());
-                child = Command::new("arch-chroot")
-                    .arg("/mnt")
-                    .arg("pacman")
-                    .arg("-Syyu")
-                    .arg("--needed")
-                    .arg("--noconfirm")
-                    .args(&pkgs)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to start pacman");
-            }
-
-            // ---------- FEDORA ----------
-            PackageManager::Dnf => {
-                exec::mount_chroot_base().expect("Failed to mount chroot filesystems");
-
-                // refresh cache (host config)
-                Command::new("dnf")
-                    .arg("makecache")
-                    .arg("--refresh")
-                    .status()
-                    .expect("Failed to refresh dnf cache");
-
-                let mut cmd = Command::new("dnf");
-                cmd.arg("--installroot=/mnt")
-                    .arg("--use-host-config");
-                match mode {
-                    InstallMode::Install => {
-                        cmd.arg("install")
-                            .arg("-y")
-                            .arg("--setopt=install_weak_deps=False")
-                            .args(&pkgs);
-                    }
-                    InstallMode::Remove => {
-                        cmd.arg("remove").arg("-y").args(&pkgs);
-                    }
-                }
-                child = cmd
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to start dnf");
-            }
-            PackageManager::RpmOSTree => {
-                let mut cmd = Command::new("chroot");
-                cmd.arg("/mnt").arg("rpm-ostree");
-                match mode {
-                    InstallMode::Install => cmd.arg("install").args(&pkgs),
-                    InstallMode::Remove  => cmd.arg("override").arg("remove").args(&pkgs),
-                };
-                child = cmd
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to start rpm-ostree");
-            }
-
-            // ---------- NIXOS ----------
-            PackageManager::Nix => {
-                let install_nixos_args = "nixos-install --no-root-password --keep-going".to_string();
-                let install_args = vec!["-p", "nixos-install-tools", "--run", &install_nixos_args];
-
-                child = Command::new("nix-shell")
-                    .args(&install_args)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .expect("Failed to start nixos-install (nix-shell).");
-            }
-            PackageManager::None => {
-                debug!("No package manager selected");
+    for attempt in 1..=MAX_RETRIES {
+        let (name, mut child) = match spawn(pkgmanager, pkgs) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to start package manager: {e}");
+                return 1;
             }
         };
 
-        // take pipes
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
+        // Both pipes feed a single channel so the mirror-handling below runs on
+        // one thread: two reader threads editing the same mirrorlist raced.
+        let (tx, rx) = mpsc::channel::<String>();
+        let t1 = child.stdout.take().map(|p| spawn_reader(p, tx.clone()));
+        let t2 = child.stderr.take().map(|p| spawn_reader(p, tx));
+        // (the original `tx` was moved into t2; if stderr was absent it drops here)
 
-        // Arch: pass Some(retry,pkgmanager_name) to enable mirror retry logic
-        // Fedora and Nix: pass None,None to just stream logs
-        let rflag = match pkgmanager {
-            PackageManager::Pacstrap | PackageManager::Pacman => Some(Arc::clone(&retry)),
-            _ => None,
-        };
-
-        let t1 = spawn_log_thread(BufReader::new(stdout), rflag.clone(), pkgmanager_name.clone());
-        let t2 = spawn_log_thread(BufReader::new(stderr), rflag, pkgmanager_name.clone());
-
-        t1.join().expect("stdout thread panicked");
-        t2.join().expect("stderr thread panicked");
+        let mut retry = false;
+        for line in rx {
+            info!("{line}");
+            if let Some(pm) = name
+                && handle_mirror_problem(&line, pm)
+            {
+                // Do NOT break: keep draining the pipe so the child can exit.
+                retry = true;
+            }
+        }
+        for t in [t1, t2].into_iter().flatten() {
+            let _ = t.join();
+        }
 
         let status = child.wait().expect("Failed to wait on package manager");
         last_exit = status.code().unwrap_or(-1);
         if !status.success() {
-            error!(
-                "The package manager failed with exit code: {last_exit}",
-            );
+            error!("The package manager failed with exit code: {last_exit}");
         }
 
-        // Fedora mounts per-iteration (match original behavior)
-        if matches!(pkgmanager, PackageManager::Dnf | PackageManager::RpmOSTree)
-            && let Err(e) = exec::unmount_chroot_base() {
-                error!("Warning: Failed to unmount chroot base: {e}");
-            }
-
-        retry_counter += 1;
+        if !retry {
+            break;
+        }
+        info!("Retrying package installation (attempt {attempt}/{MAX_RETRIES})");
     }
 
     last_exit
 }
 
-// One helper that supports both: Arch (retry/mirror handling) and Fedora (plain log)
-fn spawn_log_thread<R: BufRead + Send + 'static>(
-    reader_handle: R,
-    retry: Option<Arc<Mutex<bool>>>,     // Arch: Some, Fedora/Nix: None
-    pkgmanager_name: Option<String>,     // Arch: Some("pacstrap"/"pacman"), otherwise None
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        // don't double-wrap; we already receive a BufRead
-        let mut reader = reader_handle;
+/// Spawn the package manager. Returns the name used for mirrorlist handling
+/// (`Some` only for the Arch tools).
+fn spawn(pkgmanager: PackageManager, pkgs: &[String]) -> io::Result<(Option<&'static str>, Child)> {
+    let mut cmd = match pkgmanager {
+        PackageManager::Pacstrap => {
+            let mut c = Command::new("pacstrap");
+            c.arg("/mnt").args(pkgs);
+            c
+        }
+        PackageManager::Pacman => {
+            let mut c = Command::new("arch-chroot");
+            c.args(["/mnt", "pacman", "-Syyu", "--needed", "--noconfirm"]).args(pkgs);
+            c
+        }
+        PackageManager::Nix => {
+            let mut c = Command::new("nix-shell");
+            c.args(["-p", "nixos-install-tools", "--run", "nixos-install --no-root-password --keep-going"]);
+            c
+        }
+    };
+    let name = match pkgmanager {
+        PackageManager::Pacstrap => Some("pacstrap"),
+        PackageManager::Pacman => Some("pacman"),
+        PackageManager::Nix => None,
+    };
+    debug!("Spawning {cmd:?}");
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    Ok((name, child))
+}
 
+fn spawn_reader<R: io::Read + Send + 'static>(pipe: R, tx: Sender<String>) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut reader = BufReader::new(pipe);
         let mut buf: Vec<u8> = Vec::with_capacity(16 * 1024);
         loop {
             buf.clear();
             match reader.read_until(b'\n', &mut buf) {
-                Ok(0) => break, // EOF
+                Ok(0) => break,
                 Ok(_) => {
-                    // decode lossily to avoid panics on non-UTF8
-                    let mut line = String::from_utf8_lossy(&buf).into_owned();
-                    // trim trailing newline(s)
-                    while line.ends_with('\n') || line.ends_with('\r') {
-                        line.pop();
-                    }
-
-                    // always log; you can also strip control sequences if you want
-                    info!("{line}");
-
-                    // Arch-only mirror/key handling:
-                    let (Some(retry_flag), Some(pm_name)) = (&retry, &pkgmanager_name) else { continue };
-
-                    // NOTE: do NOT break the loop when we want to retry;
-                    // just set the flag and KEEP reading to drain the pipe.
-                    if line.contains("failed retrieving file") && line.contains("from") {
-                        if let Some(mirror_name) = extract_mirror_name(&line)
-                            && let Some(mirrorlist_file) = find_mirrorlist_file(&mirror_name, pm_name) {
-                                if let Err(err) = move_server_line(&mirrorlist_file, &mirror_name) {
-                                    error!("Failed to move 'Server' line in {mirrorlist_file}: {err}");
-                                } else {
-                                    info!("Detected unstable mirror: {mirror_name}. Will retry with a new one...");
-                                    *retry_flag.lock().unwrap() = true;
-                                }
-                            }
-                    } else if (line.contains("File") && line.contains("is corrupted")) || line.contains("invalid key") {
-                        let package_name = extract_package_name(&line);
-                        let repository   = get_repository_name(&package_name);
-
-                        let mirrorlist_filename = match (pm_name.as_str(), repository.as_str()) {
-                            ("pacstrap", "chaotic-aur") | ("pacman", "chaotic-aur") =>
-                                "/etc/pacman.d/chaotic-mirrorlist",
-                            ("pacstrap", _) =>
-                                "/etc/pacman.d/mirrorlist",
-                            ("pacman",   _) =>
-                                "/mnt/etc/pacman.d/mirrorlist",
-                            _ => "",
-                        }.to_string();
-
-                        match get_first_mirror_name(&mirrorlist_filename) {
-                            Ok(mirror_name) => {
-                                if let Err(err) = move_server_line(&mirrorlist_filename, &mirror_name) {
-                                    error!("Failed to move 'Server' line in {mirrorlist_filename}: {err}");
-                                } else {
-                                    info!("Detected issue on mirror: {mirror_name}. Will retry with a new one...");
-                                    *retry_flag.lock().unwrap() = true;
-                                }
-                            }
-                            Err(err) => error!("Error: {err}"),
-                        }
+                    let line = String::from_utf8_lossy(&buf);
+                    if tx.send(line.trim_end_matches(['\r', '\n']).to_string()).is_err() {
+                        break;
                     }
                 }
                 Err(e) => {
-                    // Log the read error but keep the loop going to try to drain further bytes.
-                    // If you'd rather bail on persistent I/O errors, you could count consecutive errors.
                     error!("read stream error: {e}");
-                    // optional: small sleep/yield here
+                    break;
                 }
             }
         }
     })
 }
 
-// Function to extract the mirror name from the error message
+/// Inspect one line of pacman output; demote the responsible mirror if it
+/// reports a download, corruption or key failure. Returns true if the install
+/// should be retried.
+fn handle_mirror_problem(line: &str, pm_name: &str) -> bool {
+    if line.contains("failed retrieving file") && line.contains("from") {
+        let Some(mirror_name) = extract_mirror_name(line) else { return false };
+        let Some(mirrorlist_file) = find_mirrorlist_file(&mirror_name, pm_name) else { return false };
+        match move_server_line(mirrorlist_file, &mirror_name) {
+            Ok(()) => {
+                info!("Detected unstable mirror: {mirror_name}. Will retry with a new one...");
+                true
+            }
+            Err(err) => {
+                error!("Failed to move 'Server' line in {mirrorlist_file}: {err}");
+                false
+            }
+        }
+    } else if (line.contains("File") && line.contains("is corrupted")) || line.contains("invalid key") {
+        let package_name = extract_package_name(line);
+        let repository = get_repository_name(&package_name);
+        let mirrorlist_filename = match (pm_name, repository.as_str()) {
+            (_, "chaotic-aur") => "/etc/pacman.d/chaotic-mirrorlist",
+            ("pacstrap", _) => "/etc/pacman.d/mirrorlist",
+            _ => "/mnt/etc/pacman.d/mirrorlist",
+        };
+        match get_first_mirror_name(mirrorlist_filename).and_then(|m| move_server_line(mirrorlist_filename, &m).map(|_| m)) {
+            Ok(mirror_name) => {
+                info!("Detected issue on mirror: {mirror_name}. Will retry with a new one...");
+                true
+            }
+            Err(err) => {
+                error!("Could not rotate mirror in {mirrorlist_filename}: {err}");
+                false
+            }
+        }
+    } else {
+        false
+    }
+}
+
+/// The word following "from" in a pacman download error.
 fn extract_mirror_name(error_message: &str) -> Option<String> {
-    // Split the error message by whitespace to get individual words
-    let words: Vec<&str> = error_message.split_whitespace().collect();
-
-    // Iterate through the words to find the word "from" and the subsequent word
-    if let Some(from_index) = words.iter().position(|&word| word == "from")
-        && let Some(mirror_name) = words.get(from_index + 1) {
-            return Some(mirror_name.to_string());
-        }
-
-    None // Return None if no mirror name is found
+    let mut words = error_message.split_whitespace();
+    words.find(|w| *w == "from")?;
+    words.next().map(str::to_string)
 }
 
-// Function to find the mirrorlist file containing the mirror
-fn find_mirrorlist_file(mirror_name: &str, pkgmanager_name: &str) -> Option<String> {
-    // Define the paths to the mirrorlist files
-    let mut mirrorlist_paths: [&str; 2] = ["", ""];
-    if pkgmanager_name == "pacstrap" {
-        mirrorlist_paths = [
-            "/etc/pacman.d/mirrorlist",
-            "/etc/pacman.d/chaotic-mirrorlist",
-        ];
-    }
-    else if pkgmanager_name == "pacman" {
-        mirrorlist_paths = [
-            "/mnt/etc/pacman.d/mirrorlist",
-            "/mnt/etc/pacman.d/chaotic-mirrorlist",
-        ];
-    }
-
-    // Iterate through the mirrorlist file paths
-    for &mirrorlist_path in &mirrorlist_paths {
-        // Read the content of the mirrorlist file
-        if let Ok(content) = fs::read_to_string(mirrorlist_path) {
-            // Check if the mirror name is contained in the file content
-            if content.contains(mirror_name) {
-                return Some(mirrorlist_path.to_string());
-            }
-        }
-    }
-
-    None // Return None if the mirror name is not found in any mirrorlist file
+fn find_mirrorlist_file(mirror_name: &str, pkgmanager_name: &str) -> Option<&'static str> {
+    let paths: &[&'static str] = match pkgmanager_name {
+        "pacstrap" => &["/etc/pacman.d/mirrorlist", "/etc/pacman.d/chaotic-mirrorlist"],
+        "pacman" => &["/mnt/etc/pacman.d/mirrorlist", "/mnt/etc/pacman.d/chaotic-mirrorlist"],
+        _ => &[],
+    };
+    paths
+        .iter()
+        .copied()
+        .find(|p| fs::read_to_string(p).map(|c| c.contains(mirror_name)).unwrap_or(false))
 }
 
-// Function to move the "Server" line in the mirrorlist file
+/// Move the line mentioning `mirror_name` after the last `Server` line, so
+/// pacman tries it last next time.
 fn move_server_line(mirrorlist_path: &str, mirror_name: &str) -> io::Result<()> {
-    // Read the content of the mirrorlist file
-    let mut lines: Vec<String> = Vec::new();
-    let file = File::open(mirrorlist_path)?;
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = line?;
-        lines.push(line);
+    let mut lines: Vec<String> = BufReader::new(File::open(mirrorlist_path)?)
+        .lines()
+        .collect::<io::Result<_>>()?;
+
+    let Some(mirror_idx) = lines.iter().position(|line| line.contains(mirror_name)) else {
+        return Ok(());
+    };
+    let mirror_line = lines.remove(mirror_idx);
+    let insert_at = lines
+        .iter()
+        .rposition(|line| line.trim().starts_with("Server"))
+        .map(|i| i + 1)
+        .unwrap_or(lines.len());
+    lines.insert(insert_at, mirror_line.clone());
+
+    let mut file = OpenOptions::new().write(true).truncate(true).open(mirrorlist_path)?;
+    for line in &lines {
+        writeln!(file, "{line}")?;
     }
-
-    // Find the index of the last line starting with "Server"
-    let last_server_index = lines.iter().rposition(|line| line.trim().starts_with("Server"));
-
-    if let Some(last_server_index) = last_server_index {
-        // Find the mirror URL line
-        if let Some(mirror_url_index) = lines.iter().position(|line| line.contains(mirror_name)) {
-            // Extract the mirror URL line
-            let mirror_url_line = lines.remove(mirror_url_index);
-
-            // Insert the mirror URL line after the last "Server" line
-            let insert_index = last_server_index;
-            lines.insert(insert_index, mirror_url_line.clone());
-            // Write the modified content back to the mirrorlist file
-            let mut file = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(mirrorlist_path)?;
-
-            for line in lines {
-                writeln!(file, "{line}")?;
-            }
-            info!("'{mirror_url_line}' moved at the end of {mirrorlist_path}");
-        }
-    }
-
+    info!("'{mirror_line}' moved to the end of {mirrorlist_path}");
     Ok(())
 }
 
-fn get_first_mirror_name(filename: &str) -> Result<String, io::Error> {
-    let file = File::open(filename)?;
-    
-    for line in BufReader::new(file).lines() {
-        let line = line?; // Unwrap the Result to get the line directly
-        if let Some(equals_index) = line.find('=') {
-            let trimmed_line = line[..equals_index].trim();
-            if trimmed_line == "Server" {
-                let mirror_url = line[equals_index + 1..].trim();
-                return Ok(mirror_url.to_string());
-            }
+fn get_first_mirror_name(filename: &str) -> io::Result<String> {
+    for line in BufReader::new(File::open(filename)?).lines() {
+        let line = line?;
+        if let Some((key, url)) = line.split_once('=')
+            && key.trim() == "Server"
+        {
+            return Ok(url.trim().to_string());
         }
     }
-    
     Err(io::Error::new(io::ErrorKind::NotFound, "Mirror not found"))
 }
 
+/// Package name from either `/pkg/<name>-<ver>.pkg.tar` or `error: <name>: invalid key`.
 fn extract_package_name(line: &str) -> String {
-    // Regular expression to match both patterns: 
-    // - /pkg/<package-name>-version.pkg.tar (file path)
-    // - error: <package-name>: invalid key found
-    let re = Regex::new(r"(?:/pkg/|error:\s)([a-zA-Z0-9\-_]+)").unwrap();
-
-    // Apply the regex to the input line
-    if let Some(captures) = re.captures(line) {
-        let package_with_version = captures[1].to_string();
-        
-        // Split the package name by "-" and remove the version part (anything after the last "-")
-        if let Some((package_name, _version)) = package_with_version.rsplit_once('-') {
-            return package_name.to_string();
-        }
-
-        return package_with_version; // If no version is found, return the entire capture
-    }
-    String::new()
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:/pkg/|error:\s)([a-zA-Z0-9\-_]+)").expect("regex"));
+    let Some(captures) = RE.captures(line) else { return String::new() };
+    let package_with_version = &captures[1];
+    package_with_version
+        .rsplit_once('-')
+        .map(|(name, _version)| name.to_string())
+        .unwrap_or_else(|| package_with_version.to_string())
 }
 
 fn get_repository_name(package_name: &str) -> String {
-    // Run the `pacman -Si` command and capture its output
-    let output = Command::new("pacman")
-        .arg("-Si")
-        .arg(package_name)
-        .output();
-
+    let output = Command::new("pacman").arg("-Si").arg(package_name).output();
     match output {
-        Ok(output) if output.status.success() => {
-            // Convert the stdout bytes to a string
-            let stdout = String::from_utf8(output.stdout);
-            match stdout {
-                Ok(stdout) => {
-                    // Find the "Repository" field in the output
-                    if let Some(repository_line) = stdout.lines().find(|line| line.starts_with("Repository")) {
-                        // Split the line by ':' and extract the repository name
-                        let parts: Vec<&str> = repository_line.split(':').collect();
-                        if parts.len() >= 2 {
-                            return parts[1].trim().to_string();
-                        }
-                    }
-                }
-                Err(_) => error!("Failed to convert stdout to string"),
-            }
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find(|line| line.starts_with("Repository"))
+            .and_then(|line| line.split(':').nth(1))
+            .map(|r| r.trim().to_string())
+            .unwrap_or_default(),
+        Ok(_) => {
+            error!("Package {package_name} not found");
+            String::new()
         }
-        Ok(_) => error!("Package not found"),
-        Err(_) => error!("Failed to execute command"),
+        Err(e) => {
+            error!("Failed to execute pacman -Si: {e}");
+            String::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mirror_name_extraction() {
+        let line = "error: failed retrieving file 'core.db' from mirror.example.org : The requested URL returned error: 404";
+        assert_eq!(extract_mirror_name(line).as_deref(), Some("mirror.example.org"));
+        assert!(extract_mirror_name("nothing here").is_none());
     }
 
-    // Return an empty string if an error occurred
-    String::new()
+    #[test]
+    fn package_name_extraction() {
+        assert_eq!(extract_package_name("error: foo-bar: invalid key found"), "foo");
+        assert_eq!(extract_package_name("/var/cache/pacman/pkg/linux-6.1.0-1.pkg.tar"), "linux");
+    }
 }

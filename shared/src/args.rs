@@ -1,7 +1,7 @@
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use log::info;
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::OnceLock;
 
 pub trait ExtendIntoString {
@@ -23,28 +23,24 @@ impl ExtendIntoString for Vec<String> {
 
 #[derive(Debug, Parser)]
 #[command(name = "dory")]
-#[command(author=env!("CARGO_PKG_AUTHORS"))]
+#[command(author = env!("CARGO_PKG_AUTHORS"))]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = env!("CARGO_PKG_DESCRIPTION"), long_about = None)]
 pub struct Cli {
     /// Increase log verbosity. Pass multiple times for more detail
-    /// (`-v` info, `-vv` debug, `-vvv` trace). Logs are written to /tmp/dory.log.
+    /// (`-v` debug, `-vv` trace). Logs are written to /tmp/dory.log.
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Use an existing system config JSON file (TUI will pass this to dory-core)
+    /// Use an existing system config JSON file (TUI will pass this to the installer)
     #[arg(long = "system-file", short = 's')]
-    pub system_file: Option<std::path::PathBuf>,
+    pub system_file: Option<PathBuf>,
 
-    /// Use an existing drives/partition JSON file (TUI will pass this to dory-core)
+    /// Use an existing drives/partition JSON file (TUI will pass this to the installer)
     #[arg(long = "drives-file", short = 'd')]
-    pub drives_file: Option<std::path::PathBuf>,
+    pub drives_file: Option<PathBuf>,
 
-    /// Additional JSON fragments to merge (forwarded to dory-core or used to build temps)
-    #[arg(long = "json", short = 'j', value_name = "JSON")]
-    pub json: Vec<String>,
-
-    /// Dry-run: validate only; do not install (TUI forwards this to dory-core)
+    /// Dry-run: validate the configuration only; do not install
     #[arg(long = "dry", short = 'n', visible_alias = "dry-run")]
     pub dry: bool,
 
@@ -66,7 +62,7 @@ pub enum ExecMode<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub enum OnFail {
-    /// Non-zero exit status => return Err (current behavior)
+    /// Non-zero exit status => return Err
     Error,
     /// Non-zero exit status => log and return Ok(status)
     Continue,
@@ -90,14 +86,12 @@ pub struct Config {
     #[serde(rename = "display_manager")]
     pub displaymanager: String,
 
-    // Flat hostname (old code used Networking{ hostname })
     pub hostname: String,
 
-    // Optional extras coming from system JSON
     #[serde(default)]
     pub keyboard_layout: Option<String>,
 
-    // New schema has locale as a single string (old code expected Vec<String>)
+    /// Locale line as found in locale.gen, e.g. "en_US.UTF-8 UTF-8"
     pub locale: String,
 
     pub timezone: String,
@@ -111,35 +105,15 @@ pub struct Config {
     pub extra_packages: Vec<String>,
 
     // ----- disk/partition config (second JSON, top-level) -----
-    // The disk JSON lives at the top level, so flatten its fields into Config.
     #[serde(flatten)]
     pub partition: Disk,
 }
 
-#[derive(Debug, ValueEnum, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PackageManager {
-    #[value(name = "dnf")]
-    Dnf,
-
-    #[value(name = "rpmostree")]
-    RpmOSTree,
-
-    #[value(name = "pacman")]
     Pacman,
-
-    #[value(name = "pacstrap")]
     Pacstrap,
-
-    #[value(name = "nix")]
     Nix,
-
-    #[value(name = "None")]
-    None,
-}
-
-pub enum InstallMode {
-    Install,
-    Remove,
 }
 
 #[derive(Clone, Debug)]
@@ -154,7 +128,6 @@ pub struct MountSpec {
 // ---- Disk / Partitions match the second JSON file ----
 #[derive(Serialize, Deserialize)]
 pub struct Disk {
-    // second JSON has: { "type": "disk", "device": "/dev/nvme0n1", "content": { ... } }
     #[serde(rename = "type")]
     pub disk_type: String,
     pub mode: String,
@@ -166,8 +139,6 @@ pub struct Disk {
 pub struct DiskContent {
     #[serde(rename = "type")]
     pub table_type: String,
-
-    // "partitions" is an object map: { "BOOT": { ... }, "ROOT": { ... }, ... }
     pub partitions: Vec<Partition>,
 }
 
@@ -180,62 +151,16 @@ pub struct Partition {
     pub end: String,
     pub filesystem: Option<String>,
     pub flags: Vec<String>,
+    /// Path of the file holding the LUKS passphrase for this partition
+    /// (only meaningful when `flags` contains "encrypt").
+    #[serde(default)]
+    pub luks_keyfile: Option<String>,
 }
 
 impl Partition {
-    pub fn new(action: String, mountpoint: Option<String>, blockdevice: String, start: String, end: String, filesystem: Option<String>, flags: Vec<String>) -> Self {
-        Self {
-            action,
-            mountpoint,
-            blockdevice,
-            start,
-            end,
-            filesystem,
-            flags,
-        }
+    pub fn has_flag(&self, flag: &str) -> bool {
+        self.flags.iter().any(|f| f.eq_ignore_ascii_case(flag))
     }
-}
-
-pub fn parse_partitions(s: &str) -> Result<Partition, &'static str> {
-    info!("{s}");
-    let parts: Vec<&str> = s.split(':').collect();
-
-    if parts.len() < 6 {
-        return Err("Partition spec requires at least 6 fields: action:mount:blockdev:start:end:fs[:flags]");
-    }
-
-    let action       = parts[0].to_string();
-    let mountpoint   = match parts[1].trim() {
-        "" | "-" => None,
-        v => Some(v.to_string()),
-    };
-    let blockdevice  = parts[2].to_string();
-    let start        = parts[3].to_string();
-    let end          = parts[4].to_string();
-    let filesystem   = match parts[5].trim() {
-        "" | "-" => None,
-        v => Some(v.to_string()),
-    };
-
-    let flags = if parts.len() >= 7 && !parts[6].trim().is_empty() {
-        parts[6]
-            .split(',')
-            .map(|f| f.trim().to_string())
-            .filter(|f| !f.is_empty())
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    Ok(Partition::new(
-        action,
-        mountpoint,
-        blockdevice,
-        start,
-        end,
-        filesystem,
-        flags,
-    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -249,9 +174,9 @@ pub static BASE: OnceLock<Base> = OnceLock::new();
 
 pub fn set_base(s: &str) {
     let b = match s {
-        "Athena Arch"   => Base::AthenaArch,
-        "Athena Nix"    => Base::AthenaNix,
-        _               => Base::Other,
+        "Athena Arch" => Base::AthenaArch,
+        "Athena Nix" => Base::AthenaNix,
+        _ => Base::Other,
     };
     let _ = BASE.set(b); // ignore if already set
 }
@@ -260,31 +185,15 @@ pub fn distro_base() -> Base {
     *BASE.get().expect("BASE not initialized")
 }
 
-pub fn is_arch() -> bool   { distro_base() == Base::AthenaArch }
-pub fn is_nix() -> bool    { distro_base() == Base::AthenaNix }
-
-#[derive(Debug, Args)]
-pub struct LocaleArgs {
-    /// The keyboard layout to use
-    pub virtkeyboard: String,
-    pub x11keyboard: String,
-
-    /// The timezone to use
-    pub timezone: String,
-
-    /// The locales to set
-    pub locales: Vec<String>,
+pub fn is_arch() -> bool {
+    distro_base() == Base::AthenaArch
 }
-
-#[derive(Debug, Args)]
-pub struct NetworkingArgs {
-    /// The hostname to assign to the system
-    pub hostname: String,
+pub fn is_nix() -> bool {
+    distro_base() == Base::AthenaNix
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct User {
-    // New schema uses "username" and "password_hash"
     #[serde(rename = "username")]
     pub name: String,
 
@@ -297,148 +206,190 @@ pub struct User {
     pub groups: Vec<String>,
 }
 
-#[derive(Debug, Subcommand)]
-pub enum UsersSubcommand {
-    /// Create a new user
-    #[command(name="new-user", aliases=&["newUser"])]
-    NewUser(NewUserArgs),
+/// Error returned when a config string does not name a known option.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownOption(pub String);
 
-    /// Set the password of the root user
-    #[command(name="root-password", aliases=&["root-pass", "rootPass"])]
-    RootPass {
-        /// The password to set. NOTE: Takes hashed password, use `mkpasswd <password>` to generate the hash.
-        password: String,
-    },
+impl std::fmt::Display for UnknownOption {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown option '{}'", self.0)
+    }
 }
 
-#[derive(Debug, Args)]
-pub struct NewUserArgs {
-    /// The name of the user to create
-    pub username: String,
-
-    /// The password to set. NOTE: Takes hashed password, use `mkpasswd <password>` to generate the hash.
-    /// When not providing a password mkpasswd jumps into an interactive masked input mode allowing you to hide your password
-    /// from the terminal history.
-    pub password: String,
-
-    /// The shell to use for the user. The current options are bash, csh, fish, tcsh, and zsh.
-    /// If a shell is not specified or unknown, it defaults to fish.
-    pub shell: String,
+fn norm(s: &str) -> String {
+    s.trim().to_lowercase()
 }
 
-#[derive(Debug, ValueEnum, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DesktopSetup {
-    #[value(name = "onyx")]
     Onyx,
-
-    #[value(name = "gnome")]
     Gnome,
-
-    #[value(name = "kde", aliases = ["plasma"])]
     Kde,
-
-    #[value(name = "budgie")]
     Budgie,
-
-    #[value(name = "cinnamon")]
     Cinnamon,
-
-    #[value(name = "mate")]
     Mate,
-
-    #[value(name = "xfce-refined")]
     XfceRefined,
-
-    #[value(name = "xfce-picom")]
     XfcePicom,
-
-    #[value(name = "enlightenment")]
     Enlightenment,
-
-    #[value(name = "lxqt")]
     Lxqt,
-
-    #[value(name = "sway")]
     Sway,
-
-    #[value(name = "i3")]
     I3,
-
-    #[value(name = "herbstluftwm")]
     Herbstluftwm,
-
-    #[value(name = "awesome")]
     Awesome,
-
-    #[value(name = "bspwm")]
     Bspwm,
-
-    #[value(name = "hyprland")]
     Hyprland,
-
-    #[value(name = "None")]
     None,
 }
 
-#[derive(Debug, ValueEnum, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+impl FromStr for DesktopSetup {
+    type Err = UnknownOption;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match norm(s).as_str() {
+            "onyx" => Self::Onyx,
+            "gnome" => Self::Gnome,
+            "kde plasma" | "kde" | "plasma" => Self::Kde,
+            "budgie" => Self::Budgie,
+            "cinnamon" => Self::Cinnamon,
+            "mate" => Self::Mate,
+            "xfce" => Self::XfceRefined,
+            "xfce picom" => Self::XfcePicom,
+            "enlightenment" => Self::Enlightenment,
+            "lxqt" => Self::Lxqt,
+            "sway" => Self::Sway,
+            "i3" => Self::I3,
+            "herbstluftwm" => Self::Herbstluftwm,
+            "awesome" => Self::Awesome,
+            "bspwm" => Self::Bspwm,
+            "hyprland" => Self::Hyprland,
+            "none" => Self::None,
+            _ => return Err(UnknownOption(s.to_string())),
+        })
+    }
+}
+
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ThemeSetup {
-    #[value(name = "cyborg")]
     Cyborg,
-
-    #[value(name = "frost")]
     Frost,
-
-    #[value(name = "graphite")]
     Graphite,
-
-    #[value(name = "hackthebox")]
     HackTheBox,
-
-    #[value(name = "redmoon")]
     RedMoon,
-
-    #[value(name = "samurai")]
     Samurai,
-
-    #[value(name = "sweet")]
     Sweet,
-
-    #[value(name = "temple")]
     Temple,
-
-    #[value(name = "None")]
     None,
 }
 
-#[derive(Debug, ValueEnum, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+impl FromStr for ThemeSetup {
+    type Err = UnknownOption;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match norm(s).as_str() {
+            "cyborg" => Self::Cyborg,
+            "frost" => Self::Frost,
+            "graphite" => Self::Graphite,
+            "hackthebox" => Self::HackTheBox,
+            "redmoon" => Self::RedMoon,
+            "samurai" => Self::Samurai,
+            "sweet" => Self::Sweet,
+            "temple" => Self::Temple,
+            "none" => Self::None,
+            _ => return Err(UnknownOption(s.to_string())),
+        })
+    }
+}
+
+/// Display manager choice. SDDM carries the selected astronaut theme variant.
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DMSetup {
-    #[value(name = "gdm")]
     Gdm,
-
-    #[value(name = "lightdm-neon")]
     LightDMNeon,
-
-    #[value(name = "ly")]
     Ly,
-
-    #[value(name = "sddm")]
-    Sddm,
-
-    #[value(name = "None")]
+    Sddm(SddmTheme),
     None,
 }
 
-#[derive(Debug, ValueEnum, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SddmTheme {
+    Astronaut,
+    BlackHole,
+    Cyberpunk,
+    Cyborg,
+    JakeTheDog,
+    Kath,
+    PixelSakura,
+    PostApocalypse,
+    PurpleLeaves,
+}
+
+impl SddmTheme {
+    /// Theme config name as used both by the sddm-astronaut-theme package
+    /// (`Themes/<name>.conf`) and the Athena Nix `sddmtheme` option.
+    pub fn conf_name(self) -> &'static str {
+        match self {
+            Self::Astronaut => "astronaut",
+            Self::BlackHole => "black_hole",
+            Self::Cyberpunk => "cyberpunk",
+            Self::Cyborg => "japanese_aesthetic",
+            Self::JakeTheDog => "jake_the_dog",
+            Self::Kath => "hyprland_kath",
+            Self::PixelSakura => "pixel_sakura",
+            Self::PostApocalypse => "post-apocalyptic_hacker",
+            Self::PurpleLeaves => "purple_leaves",
+        }
+    }
+}
+
+impl FromStr for DMSetup {
+    type Err = UnknownOption;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match norm(s).as_str() {
+            "gdm" => Self::Gdm,
+            "lightdm neon" => Self::LightDMNeon,
+            "ly" => Self::Ly,
+            "astronaut" => Self::Sddm(SddmTheme::Astronaut),
+            "black hole" => Self::Sddm(SddmTheme::BlackHole),
+            "cyberpunk" => Self::Sddm(SddmTheme::Cyberpunk),
+            "cyborg" => Self::Sddm(SddmTheme::Cyborg),
+            "jake the dog" => Self::Sddm(SddmTheme::JakeTheDog),
+            "kath" => Self::Sddm(SddmTheme::Kath),
+            "pixel sakura" => Self::Sddm(SddmTheme::PixelSakura),
+            "post-apocalypse" => Self::Sddm(SddmTheme::PostApocalypse),
+            "purple leaves" => Self::Sddm(SddmTheme::PurpleLeaves),
+            "none" => Self::None,
+            _ => return Err(UnknownOption(s.to_string())),
+        })
+    }
+}
+
+#[derive(Debug, Copy, Clone, Ord, PartialOrd, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ShellSetup {
-    #[value(name = "bash")]
     Bash,
-
-    #[value(name = "fish")]
     Fish,
-
-    #[value(name = "zsh")]
     Zsh,
+}
 
-    #[value(name = "None")]
-    None,
+impl FromStr for ShellSetup {
+    type Err = UnknownOption;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match norm(s).as_str() {
+            "bash" => Self::Bash,
+            "fish" => Self::Fish,
+            "zsh" => Self::Zsh,
+            _ => return Err(UnknownOption(s.to_string())),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_tui_strings() {
+        assert_eq!("KDE Plasma".parse::<DesktopSetup>().unwrap(), DesktopSetup::Kde);
+        assert_eq!(" xfce ".parse::<DesktopSetup>().unwrap(), DesktopSetup::XfceRefined);
+        assert_eq!("Jake the Dog".parse::<DMSetup>().unwrap(), DMSetup::Sddm(SddmTheme::JakeTheDog));
+        assert_eq!("Lightdm Neon".parse::<DMSetup>().unwrap(), DMSetup::LightDMNeon);
+        assert!("plasmoid".parse::<DesktopSetup>().is_err());
+    }
 }

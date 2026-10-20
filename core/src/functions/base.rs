@@ -1,163 +1,109 @@
 use crate::internal::hardware;
 use crate::internal::install::install;
-use crate::internal::services::enable_service;
-use efivar::{self, efi, system};
-use log::{info, error};
+use crate::internal::kernels::{KERNELS, default_kernel};
+use crate::internal::packages;
+use crate::internal::services::enable_services;
+use log::{error, info};
 use shared::args::{ExecMode, ExtendIntoString, OnFail, PackageManager};
+use shared::encrypt::{find_target_root_luks, tpm2_available};
 use shared::exec::{exec, exec_output};
-use shared::encrypt::{find_target_root_luks, tpm2_available_esapi};
 use shared::files;
-use shared::returncode_eval::{exec_eval, exec_eval_result, files_eval};
-use std::{fs, path::{Path, PathBuf}};
+use shared::returncode_eval::{exec_eval, files_eval};
+use std::{
+    fs,
+    path::Path,
+    sync::OnceLock,
+    thread,
+};
 
-pub fn install_packages(mut packages: Vec<String>, kernel: &str) -> i32 {
-    let kernels = vec![
-        kernel.to_string(),              // the user-selected kernel (e.g. "linux-aegis-offensive")
-        "linux-aegis-hardened".to_string(),    // always install hardened too
-    ];
-    let kernel_headers: Vec<String> =
-        kernels.iter().map(|k| format!("{}-headers", k)).collect();
+const CHROOT: ExecMode<'static> = ExecMode::Chroot { root: "/mnt" };
+const MKINITCPIO_CONF: &str = "/mnt/etc/mkinitcpio.conf";
+const SECUREBOOT_KEY_DIR: &str = "/etc/secureboot/keys";
 
-    let arch_base_pkg: Vec<String> = vec![
+pub fn install_packages(mut packages: Vec<String>) -> i32 {
+    let arch_base_pkg: Vec<String> = packages::to_strings(&[
         // Base Arch
-        "pacman".into(),
-        "mkinitcpio".into(),
-        "glibc-locales".into(), // Prebuilt locales to prevent locales warning message during the pacstrap install of base metapackage
+        "pacman",
+        "mkinitcpio",
+        "glibc-locales", // Prebuilt locales to prevent locale warnings during pacstrap
         // Repositories
-        "athena-mirrorlist".into(),
-        "blackarch-mirrorlist".into(),
-        "chaotic-mirrorlist".into(),
-        "rate-mirrors".into(),
-        "archlinux-keyring".into(),
-        "athena-keyring".into(),
-        "blackarch-keyring".into(),
-        "chaotic-keyring".into(),
-    ];
+        "athena-mirrorlist",
+        "blackarch-mirrorlist",
+        "chaotic-mirrorlist",
+        "rate-mirrors",
+        "archlinux-keyring",
+        "athena-keyring",
+        "blackarch-keyring",
+        "chaotic-keyring",
+    ]);
 
-    packages.extend_into(&kernels);
-    packages.extend_into(kernel_headers);
+    packages.extend(KERNELS.iter().flat_map(|k| [k.pkg.to_string(), k.headers()]));
 
-    if tpm2_available_esapi() {
-        packages.extend_into(["tpm2-tools"]);
+    if tpm2_available() {
+        packages.push("tpm2-tools".into());
     }
 
-    /***** CHECK IF BTRFS *****/
-    let (fstype, _fs_uuid) = detect_root_fs_info();
+    let (fstype, _fs_uuid) = root_fs_info();
     if fstype == "btrfs" {
-        packages.extend_into(["btrfs-progs"]);
+        packages.push("btrfs-progs".into());
     }
     info!("Root partition is {fstype}");
 
-    let (virt_packages, virt_services, virt_params) = hardware::virt_check();
-    let cpu_packages = hardware::cpu_check();
-    let gpu_packages = hardware::gpu_check(kernel); // linux-aegis-offensive
+    let (virt_packages, virt_services, virt_modules) = hardware::virt_check();
     packages.extend_into(virt_packages);
-    packages.extend_into(cpu_packages);
-    packages.extend_into(gpu_packages);
+    packages.extend_into(hardware::cpu_check());
+    packages.extend_into(hardware::gpu_check());
 
+    // Keyrings must be initialised before installing the base package group,
+    // otherwise pacstrap fails with keyring errors.
+    init_keyrings_mirrors();
+    // Must be done before installing any Athena and Chaotic AUR package.
+    files::copy_file("/etc/pacman.conf", "/mnt/etc/pacman.conf");
 
-    init_keyrings_mirrors(); // Need to initialize keyrings before installing base package group otherwise get keyring errors. It uses rate-mirrors for Arch and Chaotic AUR on the host
-    files::copy_file("/etc/pacman.conf", "/mnt/etc/pacman.conf"); // It must be done before installing any Athena and Chaotic AUR package
-
-    let code = install(
-        PackageManager::Pacstrap,
-        arch_base_pkg,
-        None
-    ); // By installing it as first package, we can work on its config files without building the initramfs image. It must be done only one time at the end of the kernel package installation
+    // Installing mkinitcpio first lets us edit its config before the kernel
+    // packages build their initramfs images.
+    let code = install(PackageManager::Pacstrap, &arch_base_pkg);
     if code != 0 {
-        // Log if you want
         error!("mkinitcpio installation failed with exit code {code}");
-        return code; // or just `code` if you don't want early return
+        return code;
     }
-    
-    files::copy_file("/etc/pacman.d/mirrorlist", "/mnt/etc/pacman.d/mirrorlist"); // It must run after "pacman-mirrorlist" pkg install, that is in base package group
-    files::copy_file("/etc/pacman.d/athena-mirrorlist", "/mnt/etc/pacman.d/athena-mirrorlist");
-    files::copy_file("/etc/pacman.d/blackarch-mirrorlist", "/mnt/etc/pacman.d/blackarch-mirrorlist");
-    files::copy_file("/etc/pacman.d/chaotic-mirrorlist", "/mnt/etc/pacman.d/chaotic-mirrorlist");
-    
+
+    // Must run after the pacman-mirrorlist package (in base) is installed.
+    for list in ["mirrorlist", "athena-mirrorlist", "blackarch-mirrorlist", "chaotic-mirrorlist"] {
+        files::copy_file(&format!("/etc/pacman.d/{list}"), &format!("/mnt/etc/pacman.d/{list}"));
+    }
+
     hardware::set_cores();
-    exec_eval(
-        exec( // Using direct exec instead of ArchChroot exec because in the latter, these sed arguments need some chars to be escaped
-            ExecMode::Direct,
-            "sed",
-            vec![
-                "-i".into(),
-                "-e".into(),
-                "s/^HOOKS=.*/HOOKS=(base systemd autodetect modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck)/g".into(),
-                "/mnt/etc/mkinitcpio.conf".into(),
-            ],
-            OnFail::Error,
+    files_eval(
+        files::sed_file(
+            MKINITCPIO_CONF,
+            "(?m)^HOOKS=.*",
+            "HOOKS=(base systemd autodetect modconf kms keyboard sd-vconsole block sd-encrypt lvm2 filesystems fsck)",
         ),
         "Set mkinitcpio hooks.",
     );
     files_eval(
-        files::sed_file(
-            "/mnt/etc/mkinitcpio.conf",
-            "#COMPRESSION=\"lz4\"",
-            "COMPRESSION=\"gzip\"", // systemd-stub (and therefore UKI) expects an initrd compressed with gzip
-        ),
+        // systemd-stub (and therefore UKI) expects an initrd compressed with gzip
+        files::sed_file(MKINITCPIO_CONF, "#COMPRESSION=\"lz4\"", "COMPRESSION=\"gzip\""),
         "Set compression algorithm.",
     );
-    /*
-    let preset_dir = "/mnt/etc/mkinitcpio.d";
-    std::fs::create_dir_all(preset_dir).unwrap();
-    // By creating our custom presets (with UKI entry), the kernel installation won't create its default preset files
-    for k in &kernels {
-        let preset_path = format!("{}/{}.preset", preset_dir, k);
-        let content = format!(
-r#"ALL_config="/etc/mkinitcpio.conf"
-ALL_kver="/boot/vmlinuz-{kernel}"
-                
-PRESETS=('default')
-                
-default_uki="/efi/EFI/Athena/{kernel}.efi"
-default_options=""
-"#,
-            kernel = k,
-        );
-    
-        std::fs::write(&preset_path, content)
-            .expect("Failed to write mkinitcpio preset.");
-        info!("Created mkinitcpio preset: {}", preset_path);
-    }
-    */
 
-    if let Some(vendor) = sys_vendor() {
-        let vendor_lc = vendor.to_lowercase();
-
-        if vendor_lc.contains("apple") {
+    match sys_vendor() {
+        Some(vendor) if vendor.to_lowercase().contains("apple") => {
             info!("Detected Apple hardware (sys_vendor='{vendor}'). Setting Mac-specific MODULES.");
-
-            exec_eval(
-                exec(
-                    ExecMode::Direct,
-                    "sed",
-                    vec![
-                        "-i".into(),
-                        "-e".into(),
-                        r"/^MODULES=()/ s/()/(usb_storage uas xhci_hcd ahci libahci sd_mod usbhid hid_apple xhci_pci ehci_pci ohci_hcd uhci_hcd)/".into(),
-                        "-e".into(),
-                        r"/^MODULES=([^)]*)/ { /usb_storage uas xhci_hcd ahci libahci sd_mod usbhid hid_apple xhci_pci ehci_pci ohci_hcd uhci_hcd/! s/)/ usb_storage uas xhci_hcd ahci libahci sd_mod usbhid hid_apple xhci_pci ehci_pci ohci_hcd uhci_hcd)/ }".into(),
-                        "/mnt/etc/mkinitcpio.conf".into(),
-                    ],
-                    OnFail::Error,
-                ),
+            files_eval(
+                hardware::add_mkinitcpio_modules(hardware::APPLE_MODULES),
                 "Set mkinitcpio MODULES for Apple computer.",
             );
         }
-    } else {
-        info!("Could not read /sys/class/dmi/id/sys_vendor. Leaving MODULES as default.");
+        Some(_) => {}
+        None => info!("Could not read /sys/class/dmi/id/sys_vendor. Leaving MODULES as default."),
+    }
+    for modules in virt_modules {
+        files_eval(hardware::add_mkinitcpio_modules(modules), "Set mkinitcpio MODULES for hypervisor");
     }
 
-    // Apply sed commands for virt service for mkinitcpio.conf
-    for (description, args) in virt_params {
-        exec_eval(
-            exec(ExecMode::Direct, "sed", args, OnFail::Error),  // Apply each file change via `sed`
-            &description,       // Log the description of the file change
-        );
-    }
-
-    let code = install(PackageManager::Pacman, packages, None);
+    let code = install(PackageManager::Pacman, &packages);
     if code != 0 {
         error!("Package installation failed with exit code {code}");
         return code;
@@ -165,10 +111,7 @@ default_options=""
     files::copy_file("/mnt/usr/local/share/athena/release/os-release-athena", "/mnt/usr/lib/os-release");
     files::copy_file("/etc/skel/.bashrc", "/mnt/etc/skel/.bashrc");
 
-    // Enable the necessary services after installation
-    for service in virt_services {
-        enable_service(service);
-    }
+    enable_services(virt_services);
 
     files_eval(
         files::sed_file(
@@ -182,35 +125,31 @@ default_options=""
 }
 
 fn generate_kernel_cmdline() -> String {
-    let (fstype, fs_uuid) = detect_root_fs_info();
-    let is_btrfs_root = fstype == "btrfs";
-
-    let mut early_root_param = String::new();
+    let (fstype, fs_uuid) = root_fs_info();
+    let tpm = tpm2_available();
+    let mut cmdline = String::new();
 
     if let Some(root) = find_target_root_luks() {
-        // Encrypted root (the one backing /mnt)
-        // Use the *live* mapper name if we have it; that ensures rd.luks.name matches reality.
-        early_root_param.push_str(&format!("rd.luks.name={}={} ", root.luks_uuid, root.mapper_dev));
-        early_root_param.push_str(&format!("root=/dev/mapper/{} ", root.mapper_dev));
-        if tpm2_available_esapi() {
-            early_root_param.push_str("rd.luks.options=tpm2-device=auto ");
+        // Encrypted root: use the *live* mapper name so rd.luks.name matches reality.
+        cmdline.push_str(&format!(
+            "rd.luks.name={}={} root=/dev/mapper/{} ",
+            root.luks_uuid, root.mapper_dev, root.mapper_dev
+        ));
+        if tpm {
+            cmdline.push_str("rd.luks.options=tpm2-device=auto ");
         }
+    } else if !fs_uuid.is_empty() {
+        cmdline.push_str(&format!("root=UUID={fs_uuid} "));
     } else {
-        // Unencrypted root
-        if !fs_uuid.is_empty() {
-            early_root_param.push_str(&format!("root=UUID={fs_uuid} "));
-        } else {
-            error!("Could not determine root UUID for unencrypted root");
-        }
+        error!("Could not determine root UUID for unencrypted root");
     }
 
-    if is_btrfs_root {
-        early_root_param.push_str("rootflags=subvol=@ ");
+    if fstype == "btrfs" {
+        cmdline.push_str("rootflags=subvol=@ ");
     }
-
-    if tpm2_available_esapi() {
-        early_root_param.push_str("systemd-measure=yes ");
-    } 
+    if tpm {
+        cmdline.push_str("systemd-measure=yes ");
+    }
 
     let mut params: Vec<&str> = vec![
         "lsm=landlock,lockdown,yama,integrity,apparmor,bpf",
@@ -220,583 +159,334 @@ fn generate_kernel_cmdline() -> String {
         "zswap.enabled=0",
         "nowatchdog",
     ];
-
     if hardware::is_hyperv_guest() {
-        params.push("video=hyperv_fb:1920x1080"); // 1920x1080 is the maximum: https://wiki.archlinux.org/title/Hyper-V#Setting_resolution
+        // 1920x1080 is the maximum: https://wiki.archlinux.org/title/Hyper-V#Setting_resolution
+        params.push("video=hyperv_fb:1920x1080");
     }
 
-    format!("{early_root_param}{}", params.join(" "))
+    cmdline.push_str(&params.join(" "));
+    cmdline
 }
 
-/// Optional: write cmdline to /etc/kernel/cmdline inside target system,
-/// so future kernel/UKI regen tools know what to embed.
+/// Write cmdline to /etc/kernel/cmdline inside the target system, so future
+/// kernel/UKI regeneration tools know what to embed.
 fn write_kernel_cmdline_file(cmdline: &str) {
     files_eval(files::create_directory("/mnt/etc/kernel"), "Create /mnt/etc/kernel");
-    files::create_file("/mnt/etc/kernel/cmdline");
     files_eval(
-        files::append_file("/mnt/etc/kernel/cmdline", cmdline),
+        files::write_file("/mnt/etc/kernel/cmdline", &format!("{cmdline}\n")),
         "Write /etc/kernel/cmdline",
     );
 }
 
+/// TPM2 PCR signing key pairs embedded in the UKIs, paths inside the chroot.
+///
+/// Two policies, following the layout recommended by systemd's ukify(1):
+///  * `initrd`: valid only while in the initrd (`enter-initrd`). This is the
+///    key to enrol for LUKS auto-unlock (`systemd-cryptenroll --tpm2-public-key
+///    … --tpm2-public-key-pcrs=11`): the volume key can be released only in
+///    the initrd phase, never once the full system is running.
+///  * `system`: valid for all later phases (after switch-root). Use it for
+///    secrets that should stay available to the running system.
+struct PcrKeyPair {
+    name: &'static str,
+    private: &'static str,
+    public: &'static str,
+    /// Comma-separated list of colon-separated phase paths (ukify syntax).
+    phases: &'static str,
+}
+
+const PCR_KEYS: &[PcrKeyPair] = &[
+    PcrKeyPair {
+        name: "initrd",
+        private: "/etc/systemd/tpm2-pcr-initrd-private-key.pem",
+        public: "/etc/systemd/tpm2-pcr-initrd-public-key.pem",
+        phases: "enter-initrd",
+    },
+    PcrKeyPair {
+        name: "system",
+        private: "/etc/systemd/tpm2-pcr-private-key-system.pem",
+        public: "/etc/systemd/tpm2-pcr-public-key-system.pem",
+        phases: "enter-initrd:leave-initrd,enter-initrd:leave-initrd:sysinit,enter-initrd:leave-initrd:sysinit:ready",
+    },
+];
+
 fn ensure_pcr_keys_in_chroot() {
-    if !tpm2_available_esapi() {
+    if !tpm2_available() {
         info!("TPM2 not available; skipping PCR key generation.");
         return;
     }
+    fs::create_dir_all("/mnt/etc/systemd").expect("Failed to create /mnt/etc/systemd");
 
-    // Where we keep PCR keys inside the target system
-    let sysd_dir = "/etc/systemd";
-    let sys_priv  = format!("{sysd_dir}/tpm2-pcr-private-key-system.pem");
-    let sys_pub   = format!("{sysd_dir}/tpm2-pcr-public-key-system.pem");
-    let initrd_priv = format!("{sysd_dir}/tpm2-pcr-initrd-private-key.pem");
-    let initrd_pub  = format!("{sysd_dir}/tpm2-pcr-initrd-public-key.pem");
-
-    // Check existence inside /mnt
-    let need_system  = !std::path::Path::new(&format!("/mnt{sys_priv}")).exists()
-                    || !std::path::Path::new(&format!("/mnt{sys_pub}")).exists();
-    let need_initrd  = !std::path::Path::new(&format!("/mnt{initrd_priv}")).exists()
-                    || !std::path::Path::new(&format!("/mnt{initrd_pub}")).exists();
-
-    if !(need_system || need_initrd) {
-        info!("PCR keys already present; skipping ukify genkey.");
-        return;
-    }
-
-    // Make sure directory exists
-    std::fs::create_dir_all(format!("/mnt{sysd_dir}"))
-        .expect("Failed to create /mnt/etc/systemd");
-
-    // ukify genkey: generate only the missing pairs (ukify requires that outputs don't exist).
-    if need_system {
+    for key in PCR_KEYS {
+        let present = Path::new(&format!("/mnt{}", key.private)).exists()
+            && Path::new(&format!("/mnt{}", key.public)).exists();
+        if present {
+            info!("PCR {} keys already present; skipping ukify genkey.", key.name);
+        } else {
+            // ukify genkey requires that the outputs do not exist yet.
+            exec_eval(
+                exec(
+                    CHROOT,
+                    "ukify",
+                    ["genkey", "--pcr-private-key", key.private, "--pcr-public-key", key.public],
+                    OnFail::Error,
+                ),
+                &format!("Generate {} PCR signing keypair", key.name),
+            );
+        }
+        let path = format!("/mnt{}", key.private);
         exec_eval(
-            exec(
-                ExecMode::Chroot { root: "/mnt" },
-                "ukify",
-                vec![
-                    "genkey".into(),
-                    "--pcr-private-key".into(), sys_priv.clone(),
-                    "--pcr-public-key".into(),  sys_pub.clone(),
-                ],
-                OnFail::Error,
-            ),
-            "Generate system PCR signing keypair",
+            fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o400)),
+            &format!("Restrict {} PCR private key", key.name),
         );
     }
-    if need_initrd {
-        exec_eval(
-            exec(
-                ExecMode::Chroot { root: "/mnt" },
-                "ukify",
-                vec![
-                    "genkey".into(),
-                    "--pcr-private-key".into(), initrd_priv.clone(),
-                    "--pcr-public-key".into(),  initrd_pub.clone(),
-                ],
-                OnFail::Error,
-            ),
-            "Generate initrd PCR signing keypair",
-        );
-    }
-
-    // Permissions are up to you; these are reasonable defaults
-    exec_eval(
-        exec(ExecMode::Chroot { root: "/mnt" }, "chmod", vec!["400".into(), sys_priv], OnFail::Error),
-        "Restrict system PCR private key",
-    );
-    exec_eval(
-        exec(ExecMode::Chroot { root: "/mnt" }, "chmod", vec!["400".into(), initrd_priv], OnFail::Error),
-        "Restrict initrd PCR private key",
-    );
 }
 
-/// Build and sign a Unified Kernel Image (UKI) for one kernel flavor
-/// using Arch's ukify syntax.
-///
-/// kname: "linux-aegis-offensive" or "linux-aegis-hardened"
-/// pretty: "LTS" or "Hardened" (for boot menu entry title)
-/// esp_str: ESP mount path *inside chroot* (usually "/efi")
-/// secureboot_key_dir: path *inside chroot* to the key dir ("/etc/secureboot/keys")
-fn build_and_sign_uki(
-    kname: &str,
-    pretty: &str,
-    esp_str: &str,
-    secureboot_key_dir: Option<&str>,
-    cmdline: &str,
-) {
-    let uki_out = format!("{esp_str}/EFI/Athena/{kname}.efi");
+/// Everything that is the same for every kernel's UKI; computed once.
+struct UkiContext<'a> {
+    /// ESP mount path inside the chroot, e.g. "/efi".
+    esp: &'a str,
+    cmdline: &'a str,
+    ucode_initrd: Option<&'static str>,
+    /// Secure Boot key dir inside the chroot, when signing is enabled.
+    secureboot_key_dir: Option<&'a str>,
+    measure_pcr: bool,
+}
 
-    // ensure ESP/EFI/Athena exists on target fs
-    let athena_efi_dir = format!("/mnt{esp_str}/EFI/Athena");
-    fs::create_dir_all(&athena_efi_dir)
-        .expect("Failed to create /mnt<esp>/EFI/Athena");
+/// Build (and sign) one Unified Kernel Image per entry of [`KERNELS`], write
+/// the systemd-boot loader entries and loader.conf.
+fn build_and_sign_ukis(ctx: &UkiContext) {
+    let athena_dir = format!("/mnt{}/EFI/Athena", ctx.esp);
+    let entries_dir = format!("/mnt{}/loader/entries", ctx.esp);
+    fs::create_dir_all(&athena_dir).expect("Failed to create ESP/EFI/Athena");
+    fs::create_dir_all(&entries_dir).expect("Failed to create loader/entries");
 
-    let cpu = hardware::cpu_detect();
+    for k in KERNELS {
+        let mut args: Vec<String> = vec!["build".into(), "--linux".into(), format!("/boot/vmlinuz-{}", k.pkg)];
+        // microcode first
+        if let Some(ucode) = ctx.ucode_initrd {
+            args.extend(["--initrd".into(), ucode.into()]);
+        }
+        args.extend([
+            "--initrd".into(),
+            format!("/boot/initramfs-{}.img", k.pkg),
+            "--cmdline".into(),
+            ctx.cmdline.into(),
+            "--os-release".into(),
+            "/usr/lib/os-release".into(),
+            "--uname".into(),
+            k.pkg.into(),
+        ]);
+        if let Some(dir) = ctx.secureboot_key_dir {
+            args.extend([
+                "--signtool=sbsign".into(),
+                "--secureboot-private-key".into(),
+                format!("{dir}/MOK.key"),
+                "--secureboot-certificate".into(),
+                format!("{dir}/MOK.crt"),
+            ]);
+        }
+        if ctx.measure_pcr {
+            args.push("--measure".into());
+            for key in PCR_KEYS {
+                args.extend([
+                    "--pcr-private-key".into(),
+                    key.private.into(),
+                    "--pcr-public-key".into(),
+                    key.public.into(),
+                    "--phases".into(),
+                    key.phases.into(),
+                ]);
+            }
+        }
+        let uki_out = format!("{}/EFI/Athena/{}", ctx.esp, k.uki_name());
+        args.extend(["--output".into(), uki_out.clone()]);
 
-    let mut args: Vec<String> = Vec::new();
-    args.push("build".into());
+        exec_eval(exec(CHROOT, "ukify", &args, OnFail::Error), &format!("Create+sign UKI for {}", k.pkg));
 
-    args.push("--linux".into());
-    args.push(format!("/boot/vmlinuz-{kname}"));
-
-    // microcode first, conditionally
-    if cpu.contains("Intel") {
-        args.push("--initrd".into());
-        args.push("/boot/intel-ucode.img".into());
-    } else if cpu.contains("AMD") {
-        args.push("--initrd".into());
-        args.push("/boot/amd-ucode.img".into());
+        let entry_path = format!("{entries_dir}/{}", k.entry_name());
+        files_eval(
+            files::write_file(
+                &entry_path,
+                &format!("title   Athena OS ({})\nefi     /EFI/Athena/{}\n", k.title, k.uki_name()),
+            ),
+            &format!("Write systemd-boot entry for {}", k.pkg),
+        );
+        info!("UKI for {} created at {uki_out} and loader entry {entry_path}", k.pkg);
     }
 
-    // normal initramfs
-    args.push("--initrd".into());
-    args.push(format!("/boot/initramfs-{kname}.img"));
-
-    args.push("--cmdline".into());
-    args.push(cmdline.to_string());
-
-    args.push("--os-release".into());
-    args.push("/usr/lib/os-release".into());
-
-    args.push("--uname".into());
-    args.push(kname.to_string());
-
-    if let Some(dir) = secureboot_key_dir {
-        args.push("--signtool=sbsign".into());
-
-        args.push("--secureboot-private-key".into());
-        args.push(format!("{dir}/MOK.key"));
-
-        args.push("--secureboot-certificate".into());
-        args.push(format!("{dir}/MOK.crt"));
-    }
-
-    if tpm2_available_esapi() {
-        // Make sure keys exist (safe if called already)
-        // (Nop here if you call ensure_pcr_keys_in_chroot() earlier.)
-        // ensure_pcr_keys_in_chroot();
-
-        let sys_priv = "/etc/systemd/tpm2-pcr-private-key-system.pem";
-        let sys_pub  = "/etc/systemd/tpm2-pcr-public-key-system.pem";
-        let init_priv = "/etc/systemd/tpm2-pcr-initrd-private-key.pem";
-        let init_pub  = "/etc/systemd/tpm2-pcr-initrd-public-key.pem";
-
-        args.push("--measure".into());
-
-        // Pair #1: "system" policy → full boot phases
-        args.push("--pcr-private-key".into());
-        args.push(sys_priv.into());
-        args.push("--pcr-public-key".into());
-        args.push(sys_pub.into());
-        args.push("--phases".into());
-        args.push("enter-initrd".into()); // default full chain :contentReference[oaicite:4]{index=4}
-
-        // Pair #2: "initrd-only" policy → only up to switch-root
-        args.push("--pcr-private-key".into());
-        args.push(init_priv.into());
-        args.push("--pcr-public-key".into());
-        args.push(init_pub.into());
-        args.push("--phases".into());
-        args.push("enter-initrd".into());               // initrd-only policy :contentReference[oaicite:5]{index=5}. Btw this allows us to autounlock LUKS when we enroll PCR11
-    }
-
-    args.push("--output".into());
-    args.push(uki_out.clone());
-
-    exec_eval(
-        exec(ExecMode::Chroot { root: "/mnt" }, "ukify", args, OnFail::Error),
-        &format!("Create+sign UKI for {kname}"),
-    );
-
-    let entries_dir = format!("/mnt{esp_str}/loader/entries");
-    fs::create_dir_all(&entries_dir)
-        .expect("Failed to create loader/entries dir");
-    let entry_path = format!("{entries_dir}/athena-{kname}.conf");
-
-    files::create_file(&entry_path);
-    exec_eval(
-        files::append_file(
-            &entry_path,
+    files_eval(
+        files::write_file(
+            &format!("/mnt{}/loader/loader.conf", ctx.esp),
             &format!(
-                "title   Athena OS ({pretty})\nefi     /EFI/Athena/{kname}.efi\n",
+                "default {}\ntimeout 3\nconsole-mode keep\neditor no\n",
+                default_kernel().entry_name()
             ),
         ),
-        &format!("Write systemd-boot entry for {kname}"),
+        "Write loader.conf",
     );
-
-    info!("UKI for {kname} created at {uki_out} and loader entry {entry_path}");
 }
 
-pub fn configure_bootloader_systemd_boot_shim(espdir: PathBuf) {
-    let esp_str = espdir.to_str().unwrap();
-    info!("Configuring systemd-boot + UKI + shim Secure Boot in {esp_str}");
+pub fn configure_bootloader_systemd_boot_shim(esp: &str) {
+    info!("Configuring systemd-boot + UKI + shim Secure Boot in {esp}");
 
     let sb_supported = secure_boot_supported();
-    let secureboot_key_dir = "/etc/secureboot/keys";
 
     ensure_pcr_keys_in_chroot();
 
     let cmdline = generate_kernel_cmdline();
     write_kernel_cmdline_file(&cmdline);
 
-    let boot_is_mount = match exec_output(
-        "findmnt",
-        vec!["-n".into(), "-M".into(), "/mnt/boot".into()],
-    ) {
-        Ok(out) => out.status.success(),
-        Err(_)  => false,
-    };
-
-    let mut bootctl_args: Vec<String> = vec![
-        "--esp-path".into(),
-        esp_str.to_string(),
-    ];
+    let boot_is_mount = exec_output("findmnt", ["-n", "-M", "/mnt/boot"]).is_ok();
+    let mut bootctl_args: Vec<&str> = vec!["--esp-path", esp];
     if boot_is_mount {
         info!("/boot is a separate partition; passing --boot-path to bootctl");
-        bootctl_args.push("--boot-path".into());
-        bootctl_args.push("/boot".into());
+        bootctl_args.extend(["--boot-path", "/boot"]);
     } else {
         info!("/boot is not a separate partition; installing bootloader without --boot-path");
     }
-    bootctl_args.push("install".into());
-
-    exec_eval(
-        exec(ExecMode::Chroot { root: "/mnt" }, "bootctl", bootctl_args, OnFail::Error),
-        "Install systemd-boot",
-    );
+    bootctl_args.push("install");
+    exec_eval(exec(CHROOT, "bootctl", bootctl_args, OnFail::Error), "Install systemd-boot");
 
     if sb_supported {
-        // 2. Generate Secure Boot keypair (MOK.key / MOK.crt / MOK.cer)
-        std::fs::create_dir_all(format!("/mnt{secureboot_key_dir}"))
-            .expect("Failed to create secureboot key dir");
-
-        exec_eval(
-            exec(
-                ExecMode::Chroot { root: "/mnt" },
-                "openssl",
-                vec![
-                    "req".into(),
-                    "-newkey".into(), "rsa:2048".into(),
-                    "-nodes".into(),
-                    "-keyout".into(), format!("{secureboot_key_dir}/MOK.key"),
-                    "-new".into(),
-                    "-x509".into(),
-                    "-sha256".into(),
-                    "-days".into(), "3650".into(),
-                    "-subj".into(), "/CN=Athena OS Secure Boot Key/".into(),
-                    "-out".into(), format!("{secureboot_key_dir}/MOK.crt"),
-                ],
-                OnFail::Error,
-            ),
-            "Generate Athena Secure Boot keypair",
-        );
-
-        exec_eval(
-            exec(
-                ExecMode::Chroot { root: "/mnt" },
-                "chmod",
-                vec![
-                    "400".into(),
-                    format!("{secureboot_key_dir}/MOK.key"),
-                ],
-                OnFail::Error,
-            ),
-            "Restrict Secure Boot private key permissions",
-        );
-
-        exec_eval(
-            exec(
-                ExecMode::Chroot { root: "/mnt" },
-                "openssl",
-                vec![
-                    "x509".into(),
-                    "-outform".into(), "DER".into(),
-                    "-in".into(),  format!("{secureboot_key_dir}/MOK.crt"),
-                    "-out".into(), format!("{secureboot_key_dir}/MOK.cer"),
-                ],
-                OnFail::Error,
-            ),
-            "Generate DER (.cer) version of Athena Secure Boot cert",
-        );
-
-        // 3. Sign systemd-boot itself
-        exec_eval(
-            exec(
-                ExecMode::Chroot { root: "/mnt" },
-                "sbsign",
-                vec![
-                    "--key".into(),  format!("{secureboot_key_dir}/MOK.key"),
-                    "--cert".into(), format!("{secureboot_key_dir}/MOK.crt"),
-                    "--output".into(), format!("{esp_str}/EFI/systemd/systemd-bootx64.efi"),
-                    format!("{esp_str}/EFI/systemd/systemd-bootx64.efi"),
-                ],
-                OnFail::Error,
-            ),
-            "Sign systemd-boot with Athena key",
-        );
-
-        // 4. Set up shim as stage0 so Secure Boot works out-of-the-box,
-        //    and so first boot triggers MOK Manager instead of forcing firmware DB enrollment.
-        //
-        // Firmware will execute BOOTX64.EFI. We want that to be shim (Microsoft-signed),
-        // so Secure Boot allows it immediately.
-        //
-        // Then shim will try to load "grubx64.efi". We give it *our signed systemd-boot*
-        // under that name, and after the user enrolls AthenaSecureBoot.cer in MOK Manager,
-        // shim will allow it.
-        //
-        // So:
-        //   ESP/EFI/BOOT/BOOTX64.EFI      <- shimx64.efi (MS-signed, from shim-signed pkg)
-        //   ESP/EFI/BOOT/grubx64.efi      <- signed systemd-bootx64.efi
-        //
-        std::fs::create_dir_all(format!("/mnt{esp_str}/EFI/BOOT"))
-            .expect("Failed to create ESP/EFI/BOOT directory");
-
-        // Copy shim
-        files::copy_file(
-            "/mnt/usr/share/shim-signed/shimx64.efi",
-            &format!("/mnt{esp_str}/EFI/BOOT/BOOTX64.EFI"),
-        );
-
-        // Copy MokManager so shim can start MOK enrollment UI at first boot
-        files::copy_file(
-            "/mnt/usr/share/shim-signed/mmx64.efi",
-            &format!("/mnt{esp_str}/EFI/BOOT/mmx64.efi"),
-        );
-
-        // Copy our signed systemd-boot binary where shim expects "grubx64.efi"
-        files::copy_file(
-            &format!("/mnt{esp_str}/EFI/systemd/systemd-bootx64.efi"),
-            &format!("/mnt{esp_str}/EFI/BOOT/grubx64.efi"),
-        );
-
-        // 5. Copy Athena public cert somewhere obvious on ESP.
-        //    Shim/MOK Manager will ask to enroll it on first boot (after mokutil below).
-        std::fs::create_dir_all(format!("/mnt{esp_str}/EFI/Athena"))
-            .expect("Failed to create ESP/EFI/Athena directory");
-        files::copy_file(
-            &format!("/mnt{secureboot_key_dir}/MOK.cer"),
-            &format!("/mnt{esp_str}/EFI/Athena/AthenaSecureBoot.cer"),
-        );
-
-        // 6. Pre-register the Athena key with mokutil so first boot asks user
-        //    "Enroll this key?" in MOK Manager. This avoids making them open BIOS UI.
-        exec_eval(
-            exec(
-                ExecMode::Chroot { root: "/mnt" },
-                "mokutil",
-                vec![
-                    "--import".into(),
-                    format!("{secureboot_key_dir}/MOK.cer"),
-                    "-P".into(), // no password prompt path. If you prefer pwd-confirm flow,
-                                 // remove -P and handle mokutil --password instead.
-                ],
-                OnFail::Error,
-            ),
-            "Schedule AthenaSecureBoot.cer enrollment in MOK Manager at first boot",
-        );
-
-        info!("systemd-boot + UKI + shim configured. On first boot, MOK Manager will ask to enroll AthenaSecureBoot.cer; accept it to boot securely without touching firmware setup.");
+        setup_secure_boot_shim(esp);
     }
 
-    // 7. Build + sign UKIs for BOTH kernels using the SAME cmdline string
-    /*
-    build_and_sign_uki(
-        "linux",
-        "Vanilla",
-        esp_str,
-        if sb_supported { Some(secureboot_key_dir) } else { None },
-        &cmdline,
-    );
-    */
-    build_and_sign_uki(
-        "linux-aegis-offensive",
-        "Offensive",
-        esp_str,
-        if sb_supported { Some(secureboot_key_dir) } else { None },
-        &cmdline,
-    );
-    build_and_sign_uki(
-        "linux-aegis-hardened",
-        "Hardened",
-        esp_str,
-        if sb_supported { Some(secureboot_key_dir) } else { None },
-        &cmdline,
-    );
-
-    // 8. Write loader.conf, pick linux-aegis-offensive as default
-    let loader_dir = format!("/mnt{esp_str}/loader");
-    let entries_dir = format!("{loader_dir}/entries");
-    fs::create_dir_all(&entries_dir).expect("Failed to create loader/entries dir");
-
-    files::create_file(&format!("{loader_dir}/loader.conf"));
-    files_eval(
-        files::append_file(
-            &format!("{loader_dir}/loader.conf"),
-            "default athena-linux-aegis-offensive.conf\ntimeout 3\nconsole-mode keep\neditor no\n",
-        ),
-        "Write loader.conf",
-    );
-    /*
-    files_eval(
-        files::append_file(
-            &format!("{loader_dir}/loader.conf"),
-            "default athena-linux.conf\ntimeout 3\nconsole-mode keep\neditor no\n",
-        ),
-        "Write loader.conf",
-    );
-    */
+    let ctx = UkiContext {
+        esp,
+        cmdline: &cmdline,
+        ucode_initrd: hardware::cpu_vendor().ucode_initrd(),
+        secureboot_key_dir: sb_supported.then_some(SECUREBOOT_KEY_DIR),
+        measure_pcr: tpm2_available(),
+    };
+    build_and_sign_ukis(&ctx);
 }
 
-fn init_keyrings_mirrors() {
-    info!("Getting fastest mirrors for your location");
-    exec_eval(
-        exec( // It is done on the live system
-            ExecMode::Direct,
-            "rate-mirrors",
-            vec![
-                String::from("--concurrency"),
-                String::from("40"),
-                String::from("--disable-comments"),
-                String::from("--allow-root"),
-                String::from("--save"),
-                String::from("/etc/pacman.d/mirrorlist"), // It must be saved not in the chroot environment but on the host machine of Live Environment. Next, it will be copied automatically on the target system.
-                String::from("arch"),
-            ],
-            OnFail::Continue,
-        ),
-        "Set fastest Arch Linux mirrors on the host",
-    );
+/// Generate the Athena MOK keypair, sign systemd-boot with it and install shim
+/// as stage 0 so Secure Boot works out of the box: firmware runs shim
+/// (Microsoft-signed), shim loads our signed systemd-boot under the name
+/// `grubx64.efi`, and MOK Manager asks the user to enrol the Athena cert on
+/// first boot.
+fn setup_secure_boot_shim(esp: &str) {
+    let dir = SECUREBOOT_KEY_DIR;
+    let key = format!("{dir}/MOK.key");
+    let crt = format!("{dir}/MOK.crt");
+    let cer = format!("{dir}/MOK.cer");
+    fs::create_dir_all(format!("/mnt{dir}")).expect("Failed to create secureboot key dir");
 
     exec_eval(
         exec(
-            ExecMode::Direct,
-            "rate-mirrors",
-            vec![
-                String::from("--concurrency"),
-                String::from("40"),
-                String::from("--disable-comments"),
-                String::from("--allow-root"),
-                String::from("--save"),
-                String::from("/etc/pacman.d/blackarch-mirrorlist"),
-                String::from("blackarch"),
+            CHROOT,
+            "openssl",
+            [
+                "req", "-newkey", "rsa:2048", "-nodes", "-keyout", &key, "-new", "-x509", "-sha256", "-days", "3650",
+                "-subj", "/CN=Athena OS Secure Boot Key/", "-out", &crt,
             ],
-            OnFail::Continue,
+            OnFail::Error,
         ),
-        "Set fastest mirrors from BlackArch on the target system",
+        "Generate Athena Secure Boot keypair",
     );
-    
     exec_eval(
-        exec(
-            ExecMode::Direct,
-            "rate-mirrors",
-            vec![
-                String::from("--concurrency"),
-                String::from("40"),
-                String::from("--disable-comments"),
-                String::from("--allow-root"),
-                String::from("--save"),
-                String::from("/etc/pacman.d/chaotic-mirrorlist"), //In chroot we don't need to specify /mnt
-                String::from("chaotic-aur"),
-            ],
-            OnFail::Continue,
-        ),
-        "Set fastest mirrors from Chaotic AUR on the target system",
+        fs::set_permissions(format!("/mnt{key}"), std::os::unix::fs::PermissionsExt::from_mode(0o400)),
+        "Restrict Secure Boot private key permissions",
     );
-    
+    exec_eval(
+        exec(CHROOT, "openssl", ["x509", "-outform", "DER", "-in", &crt, "-out", &cer], OnFail::Error),
+        "Generate DER (.cer) version of Athena Secure Boot cert",
+    );
+
+    let sdboot = format!("{esp}/EFI/systemd/systemd-bootx64.efi");
+    exec_eval(
+        exec(CHROOT, "sbsign", ["--key", &key, "--cert", &crt, "--output", &sdboot, &sdboot], OnFail::Error),
+        "Sign systemd-boot with Athena key",
+    );
+
+    //   ESP/EFI/BOOT/BOOTX64.EFI  <- shimx64.efi (MS-signed, from shim-signed pkg)
+    //   ESP/EFI/BOOT/grubx64.efi  <- signed systemd-bootx64.efi
+    //   ESP/EFI/BOOT/mmx64.efi    <- MokManager so shim can start enrolment UI
+    fs::create_dir_all(format!("/mnt{esp}/EFI/BOOT")).expect("Failed to create ESP/EFI/BOOT directory");
+    files::copy_file("/mnt/usr/share/shim-signed/shimx64.efi", &format!("/mnt{esp}/EFI/BOOT/BOOTX64.EFI"));
+    files::copy_file("/mnt/usr/share/shim-signed/mmx64.efi", &format!("/mnt{esp}/EFI/BOOT/mmx64.efi"));
+    files::copy_file(&format!("/mnt{sdboot}"), &format!("/mnt{esp}/EFI/BOOT/grubx64.efi"));
+
+    // Public cert somewhere obvious on the ESP, and pre-registered with
+    // mokutil so first boot asks "Enroll this key?" without touching firmware setup.
+    fs::create_dir_all(format!("/mnt{esp}/EFI/Athena")).expect("Failed to create ESP/EFI/Athena directory");
+    files::copy_file(&format!("/mnt{cer}"), &format!("/mnt{esp}/EFI/Athena/AthenaSecureBoot.cer"));
+    exec_eval(
+        exec(CHROOT, "mokutil", ["--import", &cer, "-P"], OnFail::Error),
+        "Schedule AthenaSecureBoot.cer enrollment in MOK Manager at first boot",
+    );
+
+    info!("systemd-boot + UKI + shim configured. On first boot, MOK Manager will ask to enroll AthenaSecureBoot.cer.");
+}
+
+/// Rank mirrors for the three repositories in parallel (independent output
+/// files on the live system; they are copied into the target afterwards), then
+/// rebuild the host keyring.
+fn init_keyrings_mirrors() {
+    info!("Getting fastest mirrors for your location");
+    let jobs: [(&str, &str); 3] = [
+        ("arch", "/etc/pacman.d/mirrorlist"),
+        ("blackarch", "/etc/pacman.d/blackarch-mirrorlist"),
+        ("chaotic-aur", "/etc/pacman.d/chaotic-mirrorlist"),
+    ];
+    thread::scope(|s| {
+        for (repo, out) in jobs {
+            s.spawn(move || {
+                exec_eval(
+                    exec(
+                        ExecMode::Direct,
+                        "rate-mirrors",
+                        ["--concurrency", "40", "--disable-comments", "--allow-root", "--save", out, repo],
+                        OnFail::Continue,
+                    ),
+                    &format!("Set fastest {repo} mirrors on the host"),
+                );
+            });
+        }
+    });
+
     info!("Upgrade keyrings on the host");
-    exec_eval(
-        exec(
-            ExecMode::Direct,
-            "rm",
-            vec![
-                String::from("-rf"),
-                String::from("/etc/pacman.d/gnupg"),
-            ],
-            OnFail::Error,
-        ),
-        "Removing keys",
-    );
-    exec_eval(
-        exec(
-            ExecMode::Direct,
-            "pacman-key",
-            vec![
-                String::from("--init"),
-            ],
-            OnFail::Error,
-        ),
-        "Initialize keys",
-    );
-    exec_eval(
-        exec(
-            ExecMode::Direct,
-            "pacman-key",
-            vec![
-                String::from("--populate"),
-            ],
-            OnFail::Error,
-        ),
-        "Populate keys",
-    );
+    if Path::new("/etc/pacman.d/gnupg").exists() {
+        exec_eval(fs::remove_dir_all("/etc/pacman.d/gnupg"), "Removing keys");
+    }
+    exec_eval(exec(ExecMode::Direct, "pacman-key", ["--init"], OnFail::Error), "Initialize keys");
+    exec_eval(exec(ExecMode::Direct, "pacman-key", ["--populate"], OnFail::Error), "Populate keys");
 }
 
 pub fn genfstab() {
-    exec_eval(
-        exec(
-            ExecMode::Direct,
-            "bash",
-            vec![
-                String::from("-c"),
-                String::from("genfstab -U /mnt >> /mnt/etc/fstab"),
-            ],
-            OnFail::Error,
-        ),
-        "Generate fstab",
+    let out = exec_eval(exec_output("genfstab", ["-U", "/mnt"]), "Generate fstab");
+    files_eval(
+        files::append_file("/mnt/etc/fstab", String::from_utf8_lossy(&out.stdout).trim_end()),
+        "Write /mnt/etc/fstab",
     );
 }
 
 pub fn install_nix_config(device: &str) {
     info!("Set nix channels.");
-    // As channel we use nixos-unstable instead of nixpkgs-unstable because 'nixos-' has additional tests that ensure kernel and bootloaders actually work. And some other critical packages.
+    // nixos-unstable (not nixpkgs-unstable) has the extra tests that ensure
+    // kernel and bootloaders actually work.
     exec_eval(
         exec(
             ExecMode::Direct,
             "nix-channel",
-            vec![
-                String::from("--add"),
-                String::from("https://nixos.org/channels/nixos-unstable"),
-                String::from("nixpkgs"),
-            ],
+            ["--add", "https://nixos.org/channels/nixos-unstable", "nixpkgs"],
             OnFail::Error,
         ),
         "Set nixpkgs nix channel on the host",
     );
-    // This update is done on the host, not on the target system
     exec_eval(
-        exec(
-            ExecMode::Direct,
-            "nix-channel",
-            vec![
-                String::from("--update"),
-            ],
-            OnFail::Error,
-        ),
+        exec(ExecMode::Direct, "nix-channel", ["--update"], OnFail::Error),
         "Update nix channels on the host",
     );
-    std::fs::create_dir_all("/mnt/etc/nixos").unwrap();
+    fs::create_dir_all("/mnt/etc/nixos").expect("Failed to create /mnt/etc/nixos");
     info!("Generate hardware configuration.");
-    // nix-shell seems to work as non-sudo only by using --run; --command works only as sudo
     exec_eval(
         exec(
             ExecMode::Direct,
             "nix-shell",
-            vec![
-                String::from("-p"),
-                String::from("nixos-install-tools"),
-                String::from("--command"),
-                String::from("nixos-generate-config --root /mnt"),
-            ],
+            ["-p", "nixos-install-tools", "--command", "nixos-generate-config --root /mnt"],
             OnFail::Error,
         ),
         "Run nixos-generate-config",
@@ -806,26 +496,13 @@ pub fn install_nix_config(device: &str) {
         exec(
             ExecMode::Direct,
             "curl",
-            vec![
-                String::from("-o"),
-                String::from("/tmp/athena-nix.zip"),
-                String::from("https://codeload.github.com/Athena-OS/athena-nix/zip/refs/heads/main"),
-            ],
+            ["-fsSL", "-o", "/tmp/athena-nix.zip", "https://codeload.github.com/Athena-OS/athena-nix/zip/refs/heads/main"],
             OnFail::Error,
         ),
         "Getting latest Athena OS configuration.",
     );
     exec_eval(
-        exec(
-            ExecMode::Direct,
-            "unzip",
-            vec![
-                String::from("/tmp/athena-nix.zip"),
-                String::from("-d"),
-                String::from("/tmp/"),
-            ],
-            OnFail::Error,
-        ),
+        exec(ExecMode::Direct, "unzip", ["-o", "/tmp/athena-nix.zip", "-d", "/tmp/"], OnFail::Error),
         "Extract Athena OS configuration archive.",
     );
     info!("Install Athena OS configuration.");
@@ -833,15 +510,15 @@ pub fn install_nix_config(device: &str) {
         exec(
             ExecMode::Direct,
             "cp",
-            vec![
-                String::from("-rf"),
-                String::from("/tmp/athena-nix-main/nixos/home-manager"),
-                String::from("/tmp/athena-nix-main/nixos/hosts"),
-                String::from("/tmp/athena-nix-main/nixos/modules"),
-                String::from("/tmp/athena-nix-main/nixos/pkgs"),
-                String::from("/tmp/athena-nix-main/nixos/configuration.nix"),
-                String::from("/tmp/athena-nix-main/nixos/default.nix"),
-                String::from("/mnt/etc/nixos/"),
+            [
+                "-rf",
+                "/tmp/athena-nix-main/nixos/home-manager",
+                "/tmp/athena-nix-main/nixos/hosts",
+                "/tmp/athena-nix-main/nixos/modules",
+                "/tmp/athena-nix-main/nixos/pkgs",
+                "/tmp/athena-nix-main/nixos/configuration.nix",
+                "/tmp/athena-nix-main/nixos/default.nix",
+                "/mnt/etc/nixos/",
             ],
             OnFail::Error,
         ),
@@ -856,112 +533,82 @@ pub fn install_nix_config(device: &str) {
         "Set hardware-configuration path",
     );
     files_eval(
-        files::sed_file(
-            "/mnt/etc/nixos/modules/boot/grub/default.nix",
-            "/dev/sda",
-            device,
-        ),
+        files::sed_file("/mnt/etc/nixos/modules/boot/grub/default.nix", "/dev/sda", device),
         "Set bootloader device",
-    ); 
+    );
     hardware::cpu_check();
     hardware::gpu_check_nix();
     hardware::virt_check();
 }
 
-fn detect_root_fs_info() -> (String, String) {
-    // Ask findmnt for both filesystem type and UUID of /mnt in one go.
-    let output = exec_eval_result(
-        exec_output(
-            "findmnt",
-            vec![
-                "-n".into(),
-                "-o".into(),
-                "FSTYPE,UUID".into(),
-                "/mnt".into(),
-            ],
-        ),
-        "Detect filesystem type and UUID for /mnt",
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stdout.split_whitespace().collect();
-
-    let fstype = parts.first().unwrap_or(&"").to_string();
-    let uuid = parts.get(1).unwrap_or(&"").to_string();
-
-    if fstype.is_empty() {
-        error!("Failed to detect filesystem type for /mnt");
-    }
-
-    if uuid.is_empty() {
-        error!("Failed to detect filesystem UUID for /mnt");
-    }
-
-    (fstype, uuid)
+/// (fstype, UUID) of the filesystem mounted at /mnt. Cached: both callers run
+/// after the root has been mounted and before it is unmounted.
+fn root_fs_info() -> (String, String) {
+    static INFO: OnceLock<(String, String)> = OnceLock::new();
+    INFO.get_or_init(|| {
+        let output = exec_eval(
+            exec_output("findmnt", ["-n", "-o", "FSTYPE,UUID", "/mnt"]),
+            "Detect filesystem type and UUID for /mnt",
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut parts = stdout.split_whitespace();
+        let fstype = parts.next().unwrap_or("").to_string();
+        let uuid = parts.next().unwrap_or("").to_string();
+        if fstype.is_empty() {
+            error!("Failed to detect filesystem type for /mnt");
+        }
+        if uuid.is_empty() {
+            error!("Failed to detect filesystem UUID for /mnt");
+        }
+        (fstype, uuid)
+    })
+    .clone()
 }
 
+/// Whether the firmware implements Secure Boot, judged by the presence of the
+/// `SecureBoot` EFI variable under the global vendor GUID. No efivar crate
+/// needed: efivarfs exposes it as a plain file.
 fn secure_boot_supported() -> bool {
-    // If we’re not on a UEFI system (or efivarfs isn’t exposed), SB is effectively “unsupported”.
     if !Path::new("/sys/firmware/efi").exists() {
         info!("No /sys/firmware/efi; treating Secure Boot as unsupported.");
         return false;
     }
-
-    let vm = match std::panic::catch_unwind(system) {
-        Ok(vm) => vm,
-        Err(_) => {
-            info!("efivar::system() panicked; treating Secure Boot as unsupported.");
-            return false;
-        }
-    };
-
-    // "SecureBoot" under the standard EFI global vendor GUID
-    let var = efi::Variable::new("SecureBoot");
-
-    match vm.exists(&var) {
-        Ok(true) => {
-            // SecureBoot variable exists → firmware implements Secure Boot
-            info!("SecureBoot supported.");
+    let var = Path::new("/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c");
+    match fs::read(var) {
+        // 4 bytes of attributes followed by the value byte.
+        Ok(data) => {
+            let enabled = data.get(4).copied().unwrap_or(0) == 1;
+            info!("SecureBoot supported (currently {}).", if enabled { "enabled" } else { "disabled" });
             true
         }
-        Ok(false) => {
-            // Variable simply not there → very strong sign SB is not implemented
-            info!("SecureBoot EFI variable not found; treating Secure Boot as unsupported.");
-            false
-        }
         Err(e) => {
-            // Any error talking to efivarfs / firmware → fail closed
-            info!("Error querying SecureBoot EFI variable ({e}); treating Secure Boot as unsupported.");
+            info!("SecureBoot EFI variable not readable ({e}); treating Secure Boot as unsupported.");
             false
         }
     }
 }
 
 fn sys_vendor() -> Option<String> {
-    match fs::read_to_string("/sys/class/dmi/id/sys_vendor") {
-        Ok(vendor) => {
-            let v = vendor.trim().to_string();
-            if v.is_empty() {
-                None
-            } else {
-                Some(v)
-            }
-        }
-        Err(_) => None,
-    }
+    fs::read_to_string("/sys/class/dmi/id/sys_vendor")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 pub fn enable_system_services() {
-    enable_service("ananicy");
-    enable_service("apparmor");
-    enable_service("auditd");
-    enable_service("bluetooth");
-    enable_service("cronie");
-    enable_service("docker");
-    enable_service("irqbalance");
-    enable_service("NetworkManager");
-    enable_service("podman");
-    enable_service("scx_loader");
-    enable_service("systemd-timesyncd");
-    enable_service("vnstat");
+    enable_services([
+        "ananicy",
+        "apparmor",
+        "auditd",
+        "bluetooth",
+        "cronie",
+        "docker",
+        "irqbalance",
+        "NetworkManager",
+        "podman",
+        "scx_loader",
+        "systemd-timesyncd",
+        "vnstat",
+    ]);
 }
+

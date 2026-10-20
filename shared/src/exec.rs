@@ -1,157 +1,100 @@
-use log::error;
 use crate::args::{ExecMode, OnFail};
 use crate::strings::fmt_cmdline;
+use std::ffi::OsStr;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Command, ExitStatus, Output, Stdio};
-use std::io::{self, BufRead, BufReader, Read};
 
-pub fn mount_chroot_base() -> io::Result<()> {
-    let mounts = vec![
-        ("proc", "/mnt/proc", "proc"),
-        ("sysfs", "/mnt/sys", "sysfs"),
-        ("/dev", "/mnt/dev", "bind"),
-        ("/run", "/mnt/run", "bind"),
-        ("/sys/fs/selinux", "/mnt/sys/fs/selinux", "bind"),
-    ];
-
-    for (source, target, fstype) in mounts {
-        std::fs::create_dir_all(target)?;
-
-        let status = if fstype == "bind" {
-            Command::new("mount")
-                .args(["--bind", source, target])
-                .status()?
-        } else {
-            Command::new("mount")
-                .args(["-t", fstype, source, target])
-                .status()?
-        };
-
-        if !status.success() {
-            return Err(io::Error::other(
-                format!("Failed to mount {source} to {target}"),
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-pub fn unmount_chroot_base() -> io::Result<()> {
-    for target in [
-        "/mnt/sys/fs/selinux",
-        "/mnt/run",
-        "/mnt/dev",
-        "/mnt/sys",
-        "/mnt/proc",
-    ] {
-        let status = Command::new("umount").arg(target).status()?;
-
-        if !status.success() {
-            return Err(io::Error::other(
-                format!("Failed to unmount {target}"),
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn mount_nixroot_base() -> io::Result<()> {
-    let mounts = vec![
-        ("/proc", "/mnt/proc", "bind"),
-        ("/sys", "/mnt/sys", "bind"),
-        ("/dev", "/mnt/dev", "bind"),
-    ];
-
-    for (source, target, fstype) in mounts {
-        std::fs::create_dir_all(target)?;
-
-        let status = if fstype == "bind" {
-            Command::new("mount")
-                .args(["-o", "bind", source, target])
-                .status()?
-        } else {
-            Command::new("mount")
-                .args(["-t", fstype, source, target])
-                .status()?
-        };
-
-        if !status.success() {
-            return Err(io::Error::other(
-                format!("Failed to mount {source} to {target}"),
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-fn unmount_nixroot_base() -> io::Result<()> {
-    for target in [
-        "/mnt/dev",
-        "/mnt/sys",
-        "/mnt/proc",
-    ] {
-        let status = Command::new("umount").arg(target).status()?;
-
-        if !status.success() {
-            return Err(io::Error::other(
-                format!("Failed to unmount {target}"),
-            ));
-        }
-    }
-
-    Ok(())
-}
-
-pub fn exec(
-    mode: ExecMode<'_>,
-    command: &str,
-    args: Vec<String>,
-    on_fail: OnFail,
-) -> io::Result<()> {
+/// Run a command and return `Ok(())` on success.
+///
+/// `args` accepts anything iterable over string-like items, so call sites can
+/// pass `["-s", dev, "--", "mklabel", "gpt"]` without allocating a `String`
+/// per argument.
+pub fn exec<I, S>(mode: ExecMode<'_>, command: &str, args: I, on_fail: OnFail) -> io::Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     exec_unit(mode, command, args, on_fail).map(|_| ())
 }
 
-pub fn exec_unit(
+/// Same as [`exec`] but returns the [`ExitStatus`].
+///
+/// stdout is streamed line-by-line into the log at `info` level, stderr is
+/// captured and attached to the error message on failure.
+pub fn exec_unit<I, S>(
     mode: ExecMode<'_>,
     command: &str,
-    args: Vec<String>,
+    args: I,
     on_fail: OnFail,
-) -> io::Result<ExitStatus> {
-    let (program, full_args): (&str, Vec<String>) = match mode {
-        ExecMode::Direct => (command, args),
-        ExecMode::Chroot { root } => {
-            let mut v = Vec::with_capacity(2 + args.len());
-            v.push(root.to_string());
-            v.push(command.to_string());
-            v.extend(args);
-            ("arch-chroot", v)
-        }
+) -> io::Result<ExitStatus>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    exec_with_stdin(mode, command, args, on_fail, None, false)
+}
+
+/// Run a command that must not have its arguments logged (password hashes,
+/// key material). Arguments are replaced with `<redacted>` in error messages.
+/// Optional `stdin` content is written to the child's stdin and never logged.
+pub fn exec_secret<I, S>(
+    mode: ExecMode<'_>,
+    command: &str,
+    args: I,
+    stdin: Option<&[u8]>,
+    on_fail: OnFail,
+) -> io::Result<ExitStatus>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    exec_with_stdin(mode, command, args, on_fail, stdin, true)
+}
+
+fn exec_with_stdin<I, S>(
+    mode: ExecMode<'_>,
+    command: &str,
+    args: I,
+    on_fail: OnFail,
+    stdin_data: Option<&[u8]>,
+    redact: bool,
+) -> io::Result<ExitStatus>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let (program, mut full_args): (&str, Vec<String>) = match mode {
+        ExecMode::Direct => (command, Vec::new()),
+        ExecMode::Chroot { root } => ("arch-chroot", vec![root.to_string(), command.to_string()]),
     };
+    full_args.extend(args.into_iter().map(|a| a.as_ref().to_string_lossy().into_owned()));
 
     let mut child = Command::new(program)
         .args(&full_args)
-        .stdin(Stdio::null())
+        .stdin(if stdin_data.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
 
+    if let Some(data) = stdin_data {
+        // Scope the handle so stdin is closed before we wait.
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        stdin.write_all(data)?;
+        stdin.write_all(b"\n")?;
+    }
+
     // --- log stdout line-by-line via info!() ---
-    let mut stdout = child.stdout.take().expect("piped stdout");
+    let stdout = child.stdout.take().expect("piped stdout");
     let stdout_handle = std::thread::spawn(move || -> io::Result<()> {
-        let mut reader = BufReader::new(&mut stdout);
+        let mut reader = BufReader::new(stdout);
         let mut line = Vec::<u8>::new();
         loop {
             line.clear();
-            let n = reader.read_until(b'\n', &mut line)?;
-            if n == 0 {
+            if reader.read_until(b'\n', &mut line)? == 0 {
                 break;
             }
-            let text = String::from_utf8_lossy(&line)
-                .trim_end_matches(&['\r', '\n'][..])
-                .to_string();
-            log::info!("{text}");
+            let text = String::from_utf8_lossy(&line);
+            log::info!("{}", text.trim_end_matches(['\r', '\n']));
         }
         Ok(())
     });
@@ -165,15 +108,23 @@ pub fn exec_unit(
     });
 
     let status = child.wait()?;
-    stdout_handle.join().unwrap()?; // propagate stdout I/O errors
-    let stderr_buf = stderr_handle.join().unwrap()?; // captured stderr
+    stdout_handle.join().expect("stdout reader panicked")?;
+    let stderr_buf = stderr_handle.join().expect("stderr reader panicked")?;
 
     if status.success() {
         return Ok(status);
     }
 
     let err_text = String::from_utf8_lossy(&stderr_buf).trim().to_string();
-    let cmdline = fmt_cmdline(program, &full_args);
+    let cmdline = if redact {
+        // Only the program (and chroot wrapper) survive in the log.
+        let shown = full_args.iter().take(if program == "arch-chroot" { 2 } else { 0 });
+        let mut s = fmt_cmdline(program, &shown.cloned().collect::<Vec<_>>());
+        s.push_str(" <redacted>");
+        s
+    } else {
+        fmt_cmdline(program, &full_args)
+    };
 
     let msg = if err_text.is_empty() {
         format!("'{cmdline}' command exited with {status}")
@@ -190,92 +141,62 @@ pub fn exec_unit(
     }
 }
 
-/// Executes a command inside the nix chroot environment.
-pub fn exec_nixroot(
-    command: &str,
-    args: Vec<String>,
-) -> Result<ExitStatus, std::io::Error> {
-    mount_nixroot_base().expect("Failed to mount chroot filesystems");
-
-    // First: run system activation
-    let activate_status = Command::new("chroot")
-        .arg("/mnt")
-        .arg("/nix/var/nix/profiles/system/activate")
-        .status()?;
-
-    if !activate_status.success() {
-        error!("System activation failed with exit code: {:?}", activate_status.code());
-    }
-
-    // Second: enter bash inside the new system
-    let result = Command::new("chroot")
-        .arg("/mnt")
-        .arg(format!("/run/current-system/sw/bin/{} {}", command, args.join(" ")).as_str())
-        .status();
-
-    // Always attempt cleanup
-    if let Err(e) = unmount_nixroot_base() {
-        error!("Warning: Failed to clean up chroot mounts: {e}");
-    }
-
-    result
-}
-
-pub fn exec_output(command: &str, args: Vec<String>) -> Result<Output, io::Error> {
-    let output = Command::new(command)
-        .args(args)
-        .output()?; // propagates std::io::Error if the command fails to run
-
+/// Run a command and return its captured [`Output`]. Non-zero exit is an error
+/// carrying stderr.
+pub fn exec_output<I, S>(command: &str, args: I) -> io::Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new(command).args(args).output()?;
     if !output.status.success() {
-        let err_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(io::Error::other(err_msg.to_string()));
+        return Err(io::Error::other(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ));
     }
-
     Ok(output)
 }
 
-pub fn exec_workdir(
-    command: &str,
-    workdir: &str,
-    args: Vec<String>,
-) -> io::Result<()> {
+/// Run a command in `workdir`.
+pub fn exec_workdir<I, S>(command: &str, workdir: &str, args: I) -> io::Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args: Vec<String> = args
+        .into_iter()
+        .map(|a| a.as_ref().to_string_lossy().into_owned())
+        .collect();
     let out = Command::new(command)
         .args(&args)
         .current_dir(workdir)
         .stdin(Stdio::null())
-        .output()?; // captures stdout/stderr
+        .output()?;
 
     if out.status.success() {
         return Ok(());
     }
 
     let err_text = String::from_utf8_lossy(&out.stderr).trim().to_string();
-
     let cmdline = fmt_cmdline(command, &args);
-
     let msg = if err_text.is_empty() {
         format!("(In {workdir}) '{cmdline}' command exited with {}", out.status)
     } else {
         format!("(In {workdir}) '{cmdline}' command failed. {err_text}")
     };
-
     Err(io::Error::other(msg))
 }
 
-pub fn check_if_root() -> bool {
-    let output = Command::new("id")
-        .arg("-u")
-        .output()
-        .expect("Failed to execute command");
+/// Returns true when the effective UID is 0. No process spawn needed.
+pub fn is_root() -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() == 0 }
+}
 
-    if let Ok(euid_str) = String::from_utf8(output.stdout) {
-        let euid: u32 = euid_str.trim().parse().unwrap_or(1);
-        if euid != 0 {
-            eprintln!("You must be root to perform this operation.");
-            std::process::exit(1);
-        }
-        return true; // Return true if running as root
+/// Exit with a message if not running as root.
+pub fn check_if_root() {
+    if !is_root() {
+        eprintln!("You must be root to perform this operation.");
+        std::process::exit(1);
     }
-
-    false // If there's an error, return false
 }

@@ -7,7 +7,7 @@ use ratatui::{
 };
 use serde_json::Value;
 use shared::partition::is_uefi;
-use std::{fs::{OpenOptions, set_permissions, Permissions}, io::Write, os::unix::fs::PermissionsExt, process::Command};
+use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt, process::Command};
 
 use crate::{
   drives::{
@@ -22,18 +22,25 @@ use crate::{
 
 const HIGHLIGHT: Option<(Color, Modifier)> = Some((Color::Yellow, Modifier::BOLD));
 
+/// Path of the key file holding the LUKS passphrase for partition `id`.
+/// One file per partition, so several encrypted partitions can coexist; the
+/// backend deletes each file right after `luksOpen`.
+fn luks_keyfile_path(id: u64) -> String {
+  format!("/run/dory-luks-{id}.key")
+}
+
+/// Write a LUKS passphrase to tmpfs, created root-only from the start
+/// (no window between creation and chmod).
 fn write_luks_key_to_tmpfs(pass: &str, path: &str) -> anyhow::Result<()> {
-    let mut f = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)?;
-
-    set_permissions(path, Permissions::from_mode(0o400))?;
-
-    f.write_all(pass.as_bytes())?;
-    f.flush()?;
-    Ok(())
+  let mut f = OpenOptions::new()
+    .create(true)
+    .write(true)
+    .truncate(true)
+    .mode(0o600)
+    .open(path)?;
+  f.write_all(pass.as_bytes())?;
+  f.flush()?;
+  Ok(())
 }
 
 pub struct Drives<'a> {
@@ -56,7 +63,7 @@ impl<'a> Drives<'a> {
       styled_block(vec![
         vec![(
           None,
-          "Select how you would like to configure your drives for the NixOS installation.",
+          "Select how you would like to configure your drives for the Athena OS installation.",
         )],
         vec![
           (None, "- "),
@@ -120,7 +127,7 @@ impl<'a> Drives<'a> {
       vec![(None, "")],
       vec![(
         None,
-        "Choose how to configure your drive for NixOS installation:",
+        "Choose how to configure your drive for the Athena OS installation:",
       )],
       vec![(
         None,
@@ -209,42 +216,6 @@ impl<'a> Page for Drives<'a> {
     }
   }
 
-  fn get_help_content(&self) -> (String, Vec<ratatui::text::Line<'_>>) {
-    let help_content = styled_block(vec![
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"),
-        (None, " - Navigate options"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
-        (None, " - Select drive configuration method"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
-        (None, " - Return to main menu"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
-        (None, " - Show this help"),
-      ],
-      vec![(None, "")],
-      vec![(
-        None,
-        "Choose how to configure your drive for NixOS installation:",
-      )],
-      vec![(
-        None,
-        "• Best-effort default - Automatic partitioning (recommended)",
-      )],
-      vec![(None, "• Manual configuration - Advanced users only")],
-      vec![(None, "")],
-      vec![
-        (Some((Color::Red, Modifier::BOLD)), "WARNING: "),
-        (None, "All data on the selected drive will be erased!"),
-      ],
-    ]);
-    ("Drive Configuration".to_string(), help_content)
-  }
 }
 
 pub struct SelectDrive {
@@ -275,7 +246,7 @@ impl SelectDrive {
       vec![(None, "")],
       vec![(
         None,
-        "Select the drive you want to use for your NixOS installation.",
+        "Select the drive you want to use for your Athena OS installation.",
       )],
       vec![(
         None,
@@ -367,40 +338,6 @@ impl Page for SelectDrive {
     }
   }
 
-  fn get_help_content(&self) -> (String, Vec<ratatui::text::Line<'_>>) {
-    let help_content = styled_block(vec![
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"),
-        (None, " - Navigate drive list"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
-        (None, " - Select drive for installation"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
-        (None, " - Return to previous menu"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
-        (None, " - Show this help"),
-      ],
-      vec![(None, "")],
-      vec![(
-        None,
-        "Select the drive you want to use for your NixOS installation.",
-      )],
-      vec![(
-        None,
-        "The selected drive will be used for partitioning and formatting.",
-      )],
-      vec![
-        (Some((Color::Red, Modifier::BOLD)), "WARNING: "),
-        (None, "All data on the selected drive will be erased!"),
-      ],
-    ]);
-    ("Select Drive".to_string(), help_content)
-  }
 }
 
 pub struct SelectFilesystem {
@@ -845,34 +782,6 @@ impl Page for SelectFilesystem {
     Signal::Wait
   }
 
-  fn get_help_content(&self) -> (String, Vec<ratatui::text::Line<'_>>) {
-    let help_content = styled_block(vec![
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"),
-        (None, " - Navigate filesystem options"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
-        (None, " - Select filesystem type"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
-        (None, " - Return to previous menu"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
-        (None, " - Show this help"),
-      ],
-      vec![(None, "")],
-      vec![(None, "Choose the filesystem type for your partition.")],
-      vec![(
-        None,
-        "Different filesystems have different features and performance",
-      )],
-      vec![(None, "characteristics. ext4 is recommended for most users.")],
-    ]);
-    ("Select Filesystem".to_string(), help_content)
-  }
 }
 
 pub struct SelectSwap {
@@ -953,15 +862,6 @@ impl Page for SelectSwap {
     }
   }
 
-  fn get_help_content(&self) -> (String, Vec<ratatui::text::Line<'_>>) {
-    let help = styled_block(vec![
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"), (None, " - Navigate")],
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "Enter"), (None, " - Select swap size")],
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "Esc"), (None, " - Go back")],
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "?"), (None, " - Help")],
-    ]);
-    ("Select Swap".to_string(), help)
-  }
 }
 
 pub struct ManualPartition {
@@ -1211,41 +1111,6 @@ impl Page for ManualPartition {
     }
   }
 
-  fn get_help_content(&self) -> (String, Vec<ratatui::text::Line<'_>>) {
-    let help_content = styled_block(vec![
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"),
-        (None, " - Navigate partitions and buttons"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Tab"),
-        (None, " - Switch between partition table and buttons"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
-        (None, " - Select partition or button action"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
-        (None, " - Return to previous menu"),
-      ],
-      vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
-        (None, " - Show this help"),
-      ],
-      vec![(None, "")],
-      vec![(
-        None,
-        "Manually configure drive partitions. Select partitions to",
-      )],
-      vec![(
-        None,
-        "modify them or select free space to create new partitions.",
-      )],
-      vec![(None, "Use buttons at bottom for additional actions.")],
-    ]);
-    ("Manual Partitioning".to_string(), help_content)
-  }
 }
 
 pub struct NewPartition {
@@ -1336,40 +1201,16 @@ impl NewPartition {
       new_part_luks_password: None,
     }
   }
-  fn dry_run_accepts(&self, installer: &Installer, size_sectors: u64) -> bool {
-      let Some(ref dev) = installer.drive_config else { return false; };
-      // clone so we don't mutate the real config
-      let mut tmp = dev.clone();
-      let part = Partition::new(
-          self.part_start,
-          size_sectors,
-          self.sector_size,
-          PartStatus::Create,
-          None,                 // type
-          self.new_part_fs.clone(),
-          None,                 // mount point not needed for geometry
-          None,                 // label
-          false,                // bootable
-          vec![],               // flags (geometry only)
-      );
-      tmp.new_partition(part).is_ok()
-  }
+  /// Largest partition that fits in the free-space item this page was opened
+  /// for. New partitions can only be created inside a free-space entry, so the
+  /// answer is simply that entry's current size.
   fn compute_max_fit(&mut self, installer: &Installer) -> u64 {
-      if let Some(m) = self.max_fit { return m; }
-      let mut lo = 1;
-      let mut hi = self.total_size;
-      let mut best = 0;
-      while lo <= hi {
-          let mid = (lo + hi) / 2;
-          if self.dry_run_accepts(installer, mid) {
-              best = mid;
-              lo = mid + 1;
-          } else {
-              hi = mid - 1;
-          }
-      }
-      self.max_fit = Some(best);
-      best
+    if let Some(m) = self.max_fit {
+      return m;
+    }
+    let best = self.live_max_size_sectors(installer).unwrap_or(self.total_size);
+    self.max_fit = Some(best);
+    best
   }
   fn finalize_new_partition(&mut self, installer: &mut Installer) -> Signal {
       let Some(ref mut device) = installer.drive_config else {
@@ -1380,7 +1221,6 @@ impl NewPartition {
       };
 
       let is_swap = self.new_part_fs.as_deref() == Some("swap");
-      let luks_path = "/run/luks";
 
       let mut flags = if !is_swap && self.new_part_mount_point.as_deref() == Some("/efi") {
           vec!["boot".to_string(), "esp".to_string()]
@@ -1413,7 +1253,7 @@ impl NewPartition {
       // swap must not have a mount point
       let mp = if is_swap { None } else { self.new_part_mount_point.clone() };
 
-      let new_part = Partition::new(
+      let mut new_part = Partition::new(
           self.part_start,
           size,
           self.sector_size,
@@ -1428,9 +1268,13 @@ impl NewPartition {
 
       if self.new_part_encrypt == Some(true)
         && let Some(pw) = &self.new_part_luks_password
-          && let Err(e) = write_luks_key_to_tmpfs(pw, luks_path) {
-            return Signal::Error(anyhow::anyhow!("Failed to write {luks_path}: {e}"));
-          }
+      {
+        let luks_path = luks_keyfile_path(new_part.id());
+        if let Err(e) = write_luks_key_to_tmpfs(pw, &luks_path) {
+          return Signal::Error(anyhow::anyhow!("Failed to write {luks_path}: {e}"));
+        }
+        new_part.set_luks_keyfile(Some(luks_path));
+      }
 
       match device.new_partition(new_part) {
         Ok(_) => { device.assign_device_numbers(); Signal::Pop }
@@ -1444,9 +1288,6 @@ impl NewPartition {
           Signal::Wait
         }
       }
-  }
-  pub fn total_size_bytes(&self) -> u64 {
-    self.total_size * self.sector_size
   }
   fn live_max_size_sectors(&self, installer: &Installer) -> Option<u64> {
     let drive = installer.drive_config.as_ref()?;
@@ -1564,8 +1405,8 @@ impl NewPartition {
     match event.code {
       ui_back!() => Signal::Pop,
       KeyCode::Enter => {
-        let input = self.size_input.get_value().unwrap();
-        let mut input = input.as_str().unwrap().trim();
+        let input = self.size_input.value();
+        let mut input = input.trim();
         if input.is_empty() { input = "100%"; }
 
         let Some(ref device) = installer.drive_config else {
@@ -1588,11 +1429,8 @@ impl NewPartition {
             Signal::Wait
           }
           Some(size) => {
-            // one more belt-and-suspenders check using the allocator
-            if !self.dry_run_accepts(installer, size) {
-              self.size_input.error("Invalid size at this location: New partition overlaps with existing");
-              return Signal::Wait;
-            }
+            // The final overlap check happens in `Disk::new_partition` when the
+            // partition is created; a failure there sends the user back here.
             self.new_part_size = Some(size);
             self.size_input.unfocus();
             self.fs_buttons.focus();
@@ -2388,7 +2226,7 @@ impl PromptLuksPassword {
       vec![(Some((Color::Yellow, Modifier::BOLD)), "Esc"), (None, " - Cancel")],
       vec![(None, "")],
       vec![(None, "Enter and confirm the LUKS passphrase.")],
-      vec![(None, "It will be serialized into the installer JSON (not hashed).")],
+      vec![(None, "It is stored in a root-only file in RAM and deleted once the partition is opened.")],
     ]);
     let help_modal = HelpModal::new("LUKS Passphrase", help_content);
 
@@ -2508,15 +2346,16 @@ impl Page for PromptLuksPassword {
             return Signal::Wait;
           }
 
-          // success: store encrypt flag and write key
+          // success: write the key and store encrypt flag + key path on the partition
+          let luks_path = luks_keyfile_path(self.dev_id);
+          if let Err(e) = write_luks_key_to_tmpfs(&pass, &luks_path) {
+            return Signal::Error(anyhow::anyhow!("Failed to write {luks_path}: {e}"));
+          }
           if let Some(dev) = installer.drive_config.as_mut()
             && let Some(p) = dev.partition_by_id_mut(self.dev_id)
           {
             p.add_flag("encrypt");
-          }
-          let luks_path = "/run/luks";
-          if let Err(e) = write_luks_key_to_tmpfs(&pass, luks_path) {
-            return Signal::Error(anyhow::anyhow!("Failed to write {luks_path}: {e}"));
+            p.set_luks_keyfile(Some(luks_path));
           }
           installer.make_drive_config_display();
           Signal::PopCount(self.pop_count_on_success)
@@ -2529,13 +2368,6 @@ impl Page for PromptLuksPassword {
     }
   }
 
-  fn get_help_content(&self) -> (String, Vec<ratatui::text::Line<'_>>) {
-    ("LUKS Passphrase".to_string(),
-     styled_block(vec![
-       vec![(None, "Enter passphrase, press Enter, confirm, press Enter.")],
-       vec![(None, "Esc to cancel.")],
-     ]))
-  }
 }
 
 struct AskEncryptRoot {

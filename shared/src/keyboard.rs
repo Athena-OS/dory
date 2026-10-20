@@ -1,5 +1,5 @@
 // keyboard.rs
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug)]
@@ -90,7 +90,7 @@ pub static KEYMAPS: &[Keymap] = &[
 ];
 
 // Fast lookup by id/alias (built once)
-pub static BY_ID: Lazy<HashMap<&'static str, &'static Keymap>> = Lazy::new(|| {
+pub static BY_ID: LazyLock<HashMap<&'static str, &'static Keymap>> = LazyLock::new(|| {
     let mut m = HashMap::new();
     for km in KEYMAPS {
         m.insert(km.id, km);

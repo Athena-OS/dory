@@ -354,7 +354,7 @@ pub fn disk_table(disks: &[Disk]) -> TableWidget {
     .unzip();
   let rows: Vec<Vec<String>> = disks
     .iter()
-    .map(|d| d.as_table_row(&DiskTableHeader::disk_table_headers()))
+    .map(|d| d.as_table_row(DiskTableHeader::disk_table_headers()))
     .collect();
   TableWidget::new("Disks", widths, headers, rows)
 }
@@ -367,7 +367,7 @@ pub fn part_table(disk_items: &[DiskItem], sector_size: u64) -> TableWidget {
       .unzip();
   let rows: Vec<Vec<String>> = disk_items
     .iter()
-    .map(|item| item.as_table_row(sector_size, &DiskTableHeader::partition_table_headers()))
+    .map(|item| item.as_table_row(sector_size, DiskTableHeader::partition_table_headers()))
     .collect();
   TableWidget::new("Partitions", widths, headers, rows)
 }
@@ -417,7 +417,6 @@ pub struct Disk {
   sector_size: u64,
 
   initial_layout: Vec<DiskItem>,
-  total_used_sectors: u64,
   /// Current partition layout including partitions and free space
   ///
   /// Partitions use half-open ranges: [start, start+size)
@@ -436,7 +435,6 @@ impl Disk {
       size,
       sector_size,
       initial_layout: layout.clone(),
-      total_used_sectors: 0,
       layout,
       label,
       mode: PartitioningMode::Manual,
@@ -444,10 +442,7 @@ impl Disk {
     new.calculate_free_space();
     new
   }
-  pub fn label(&self) -> DiskLabel { self.label }
-  pub fn set_label(&mut self, l: DiskLabel) { self.label = l; }
 
-  pub fn mode(&self) -> PartitioningMode { self.mode }
   pub fn set_mode(&mut self, mode: PartitioningMode) { self.mode = mode; }
 
   /// Get info as a table row, based on the given field names (`headers`)
@@ -474,18 +469,13 @@ impl Disk {
   pub fn as_disko_cfg(&mut self) -> Value {
     self.assign_device_numbers();
     let mut partitions = Vec::new();
+    let mut total_used_sectors: u64 = 0;
 
     let chosen_label = self.label.as_str().to_string();
 
     let disk_is_gpt = chosen_label == "gpt";
 
-    let tail_reserve = match self.label {
-        DiskLabel::Gpt => Self::default_gpt_tail_reserve(self.sector_size),
-        DiskLabel::None if is_uefi() => Self::default_gpt_tail_reserve(self.sector_size),
-        _ => 0,
-    };
-
-    let usable_total = self.size.saturating_sub(tail_reserve);
+    let usable_total = self.size.saturating_sub(self.tail_reserve());
 
     for item in &self.layout {
       if let DiskItem::Partition(p) = item {
@@ -521,7 +511,7 @@ impl Disk {
         // Human size string (needed for create/modify; fine if present on delete)
         let size_str = bytes_disko_cfg(
             p.size_bytes(p.sector_size),
-            self.total_used_sectors,
+            total_used_sectors,
             p.sector_size,
             usable_total,
         );
@@ -547,17 +537,17 @@ impl Disk {
           "mountpoint": mount_opt,                      // null if not set
           "label":      label_opt,                      // null if not set
           "flags":      flags_vec,                      // ALWAYS present (array)
+          "luks_keyfile": p.luks_keyfile(),             // null unless encrypted
         });
 
         partitions.push(part_obj);
 
         // Only count size toward "100%" logic for create/modify
         if matches!(p.status(), PartStatus::Create | PartStatus::Modify) {
-          self.total_used_sectors += p.size();
+          total_used_sectors += p.size();
         }
       }
     }
-    self.total_used_sectors = 0;
 
     json!({
       "device": format!("/dev/{}", self.name),
@@ -614,20 +604,8 @@ impl Disk {
   pub fn name(&self) -> &str {
     &self.name
   }
-  pub fn set_name<S: Into<String>>(&mut self, name: S) {
-    self.name = name.into();
-  }
-  pub fn size(&self) -> u64 {
-    self.size
-  }
-  pub fn set_size(&mut self, size: u64) {
-    self.size = size;
-  }
   pub fn sector_size(&self) -> u64 {
     self.sector_size
-  }
-  pub fn set_sector_size(&mut self, sector_size: u64) {
-    self.sector_size = sector_size;
   }
   pub fn layout(&self) -> &[DiskItem] {
     &self.layout
@@ -655,15 +633,6 @@ impl Disk {
   }
   pub fn partition_by_id_mut(&mut self, id: u64) -> Option<&mut Partition> {
     self.partitions_mut().find(|p| p.id() == id)
-  }
-  pub fn free_spaces(&self) -> impl Iterator<Item = (u64, u64)> {
-    self.layout.iter().filter_map(|item| {
-      if let DiskItem::FreeSpace { start, size, .. } = *item {
-        Some((start, size))
-      } else {
-        None
-      }
-    })
   }
   pub fn reset_layout(&mut self) {
     self.layout = self.initial_layout.clone();
@@ -729,7 +698,7 @@ impl Disk {
   /// 3. Adding FreeSpace entries for gaps larger than 5MB
   pub fn calculate_free_space(&mut self) {
     // Separate deleted partitions from the rest
-    let (deleted, mut rest) = self.layout.iter().cloned().partition::<Vec<_>, _>(
+    let (deleted, mut rest) = std::mem::take(&mut self.layout).into_iter().partition::<Vec<_>, _>(
       |item| matches!(item, DiskItem::Partition(p) if p.status == PartStatus::Delete),
     );
 
@@ -739,12 +708,7 @@ impl Disk {
     // Sort by start
     rest.sort_by_key(|p| p.start());
 
-    let tail_reserve = match self.label {
-        DiskLabel::Gpt => Self::default_gpt_tail_reserve(self.sector_size),
-        DiskLabel::None if is_uefi() => Self::default_gpt_tail_reserve(self.sector_size),
-        _ => 0,
-    };
-    let last_usable = self.size.saturating_sub(tail_reserve);
+    let last_usable = self.size.saturating_sub(self.tail_reserve());
 
     let mut gaps = vec![];
     // Leave 1 MiB at the front
@@ -783,9 +747,7 @@ impl Disk {
   /// - Adjacent free space regions are merged into single entries
   pub fn normalize_layout(&mut self) {
     // Separate deleted partitions and put them at the beginning for UI organization
-    let (mut new_layout, others): (Vec<_>, Vec<_>) = self
-      .layout()
-      .to_vec()
+    let (mut new_layout, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.layout)
       .into_iter()
       .partition(|item| matches!(item, DiskItem::Partition(p) if p.status == PartStatus::Delete));
     let mut last_free: Option<(u64, u64)> = None; // Track adjacent free space: (start, size)
@@ -794,28 +756,22 @@ impl Disk {
     let mut new_new_layout = vec![];
 
     // Merge adjacent free space while preserving partition order
-    for item in &new_layout {
+    for item in new_layout {
       match item {
         DiskItem::FreeSpace { start, size, .. } => {
-          if let Some((last_start, last_size)) = last_free {
+          last_free = Some(match last_free {
             // Extend the current free space region
-            last_free = Some((last_start, last_size + size));
-          } else {
+            Some((last_start, last_size)) => (last_start, last_size + size),
             // Start tracking a new free space region
-            last_free = Some((*start, *size));
-          }
+            None => (start, size),
+          });
         }
-        DiskItem::Partition(p) => {
+        DiskItem::Partition(_) => {
           // If we have accumulated free space, add it to the layout
           if let Some((start, size)) = last_free.take() {
-            new_new_layout.push(DiskItem::FreeSpace {
-              id: get_entry_id(),
-              start,
-              size,
-            });
+            new_new_layout.push(DiskItem::FreeSpace { id: get_entry_id(), start, size });
           }
-          // Add the partition
-          new_new_layout.push(DiskItem::Partition(p.clone()));
+          new_new_layout.push(item);
         }
       }
     }
@@ -854,6 +810,15 @@ impl Disk {
       Self::gpt_tail_reserve(logical_sector, 128, 128)
   }
 
+  /// Sectors at the end of the disk reserved for the backup GPT header/table.
+  fn tail_reserve(&self) -> u64 {
+    match self.label {
+      DiskLabel::Gpt => Self::default_gpt_tail_reserve(self.sector_size),
+      DiskLabel::None if is_uefi() => Self::default_gpt_tail_reserve(self.sector_size),
+      _ => 0,
+    }
+  }
+
   /// Apply the default NixOS partitioning scheme to this disk
   ///
   /// Creates a standard two-partition layout:
@@ -861,10 +826,6 @@ impl Disk {
   /// - Remaining space for root filesystem (specified fs_type or default)
   ///
   /// All existing partitions are marked for deletion
-  pub fn use_default_layout(&mut self, fs_type: Option<String>) {
-    self.use_default_layout_with_swap(fs_type, None);
-  }
-
   pub fn use_default_layout_with_swap(&mut self, fs_type: Option<String>, swap_gb: Option<u64>) {
     // Remove all free space and newly created partitions
     // Keep existing partitions so user can see what will be deleted
@@ -872,14 +833,7 @@ impl Disk {
     self.set_mode(PartitioningMode::Auto);
 
     let disk_label = self.label;
-    // Persist the decision so the rest of the code sees it
-    self.set_label(disk_label);
-
-    let tail_reserve = match disk_label {
-        DiskLabel::Gpt => Self::default_gpt_tail_reserve(self.sector_size),
-        DiskLabel::None if is_uefi() => Self::default_gpt_tail_reserve(self.sector_size),
-        _ => 0,
-    };
+    let tail_reserve = self.tail_reserve();
 
     self.layout.retain(|item| match item {
       DiskItem::FreeSpace { .. } => false, // Remove all free space
@@ -1028,13 +982,7 @@ impl Disk {
       self.set_mode(PartitioningMode::Auto);
 
       // We are handling UEFI only; keep GPT tail reserve behavior
-      let disk_label = self.label;
-      self.set_label(disk_label);
-      let tail_reserve = match disk_label {
-          DiskLabel::Gpt => Self::default_gpt_tail_reserve(self.sector_size),
-          DiskLabel::None if is_uefi() => Self::default_gpt_tail_reserve(self.sector_size),
-          _ => 0,
-      };
+      let tail_reserve = self.tail_reserve();
       // Clear any created items, keep existing for visibility but mark them Delete
       self.layout.retain(|item| match item {
           DiskItem::FreeSpace { .. } => false,
@@ -1165,12 +1113,6 @@ impl DiskItem {
       DiskItem::FreeSpace { id, .. } => *id,
     }
   }
-  pub fn mount_point(&self) -> Option<&str> {
-    match self {
-      DiskItem::Partition(p) => p.mount_point(),
-      DiskItem::FreeSpace { .. } => None,
-    }
-  }
   pub fn as_table_row(&self, sector_size: u64, headers: &[DiskTableHeader]) -> Vec<String> {
     match self {
       DiskItem::Partition(p) => {
@@ -1245,6 +1187,9 @@ pub struct Partition {
   ro: bool,
   label: Option<String>,
   flags: Vec<String>,
+  /// File holding the LUKS passphrase for this partition (only when encrypted).
+  #[serde(default)]
+  luks_keyfile: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1273,7 +1218,14 @@ impl Partition {
       label,
       ro,
       flags,
+      luks_keyfile: None,
     }
+  }
+  pub fn luks_keyfile(&self) -> Option<&str> {
+    self.luks_keyfile.as_deref()
+  }
+  pub fn set_luks_keyfile(&mut self, path: Option<String>) {
+    self.luks_keyfile = path;
   }
   pub fn id(&self) -> u64 {
     self.id
@@ -1290,14 +1242,8 @@ impl Partition {
   pub fn end(&self) -> u64 {
     self.start + self.size
   }
-  pub fn set_start(&mut self, start: u64) {
-    self.start = start;
-  }
   pub fn size(&self) -> u64 {
     self.size
-  }
-  pub fn set_size(&mut self, size: u64) {
-    self.size = size;
   }
   pub fn status(&self) -> &PartStatus {
     &self.status
@@ -1324,7 +1270,6 @@ impl Partition {
     }
   }
   pub fn clear_mount_point(&mut self) { self.mount_point = None; }
-  pub fn is_swap(&self) -> bool { self.fs_type.as_deref() == Some("swap") }
   pub fn fs_gpt_code(&self, is_esp: bool) -> Option<&'static str> {
     match self.fs_type.as_deref()? {
       "ext4" | "ext3" | "ext2" | "btrfs" | "xfs" => Some("8300"),
@@ -1364,14 +1309,6 @@ impl Partition {
       self.flags.push(flag_str);
     }
   }
-  pub fn add_flags(&mut self, flags: impl Iterator<Item = impl Into<String>>) {
-    for flag in flags {
-      let flag = flag.into();
-      if !self.flags.contains(&flag) {
-        self.flags.push(flag);
-      }
-    }
-  }
   pub fn remove_flag<S: AsRef<str>>(&mut self, flag: S) {
     self.flags.retain(|f| f != flag.as_ref());
   }
@@ -1381,114 +1318,6 @@ impl Partition {
   }
   pub fn size_bytes(&self, sector_size: u64) -> u64 {
     self.size * sector_size
-  }
-  pub fn is_encrypted(&self) -> bool {
-    self.flags.iter().any(|f| f == "encrypt")
-  }
-}
-
-pub struct PartitionBuilder {
-  start: Option<u64>,
-  size: Option<u64>,
-  sector_size: Option<u64>,
-  status: PartStatus,
-  name: Option<String>,
-  fs_type: Option<String>,
-  mount_point: Option<String>,
-  label: Option<String>,
-  ro: Option<bool>,
-  flags: Vec<String>,
-}
-
-impl PartitionBuilder {
-  pub fn new() -> Self {
-    Self {
-      start: None,
-      size: None,
-      sector_size: None,
-      status: PartStatus::Unknown,
-      name: None,
-      fs_type: None,
-      mount_point: None,
-      label: None,
-      ro: None,
-      flags: vec![],
-    }
-  }
-  pub fn start(mut self, start: u64) -> Self {
-    self.start = Some(start);
-    self
-  }
-  pub fn size(mut self, size: u64) -> Self {
-    self.size = Some(size);
-    self
-  }
-  pub fn sector_size(mut self, sector_size: u64) -> Self {
-    self.sector_size = Some(sector_size);
-    self
-  }
-  pub fn status(mut self, status: PartStatus) -> Self {
-    self.status = status;
-    self
-  }
-  pub fn fs_type<S: Into<String>>(mut self, fs_type: S) -> Self {
-    self.fs_type = Some(fs_type.into());
-    self
-  }
-  pub fn mount_point<S: Into<String>>(mut self, mount_point: S) -> Self {
-    self.mount_point = Some(mount_point.into());
-    self
-  }
-  pub fn read_only(mut self, ro: bool) -> Self {
-    self.ro = Some(ro);
-    self
-  }
-  pub fn label<S: Into<String>>(mut self, label: S) -> Self {
-    self.label = Some(label.into());
-    self
-  }
-  pub fn add_flag<S: Into<String>>(mut self, flag: S) -> Self {
-    let flag_str = flag.into();
-    if !self.flags.contains(&flag_str) {
-      self.flags.push(flag_str);
-    }
-    self
-  }
-  pub fn build(self) -> anyhow::Result<Partition> {
-    let start = self
-      .start
-      .ok_or_else(|| anyhow::anyhow!("start is required"))?;
-    let size = self
-      .size
-      .ok_or_else(|| anyhow::anyhow!("size is required"))?;
-    let sector_size = self.sector_size.unwrap_or(512); // default to 512 if not specified
-    let mount_point = self
-      .mount_point
-      .ok_or_else(|| anyhow::anyhow!("mount_point is required"))?;
-    let ro = self.ro.unwrap_or(false);
-    if size == 0 {
-      return Err(anyhow::anyhow!("size must be greater than zero"));
-    }
-    let id = get_entry_id();
-    Ok(Partition {
-      id,
-      start,
-      size,
-      sector_size,
-      status: self.status,
-      name: self.name,
-      fs_type: self.fs_type,
-      mount_point: Some(mount_point),
-      label: self.label,
-      ro,
-      flags: self.flags,
-    })
-  }
-}
-
-impl Default for PartitionBuilder {
-  fn default() -> Self {
-    Self::new()
   }
 }
 
@@ -1521,22 +1350,8 @@ impl DiskTableHeader {
       DiskTableHeader::ReadOnly => ("Read Only".into(), Constraint::Min(21)),
     }
   }
-  pub fn all_headers() -> Vec<Self> {
-    vec![
-      DiskTableHeader::Status,
-      DiskTableHeader::Device,
-      DiskTableHeader::Label,
-      DiskTableHeader::Start,
-      DiskTableHeader::End,
-      DiskTableHeader::Size,
-      DiskTableHeader::FSType,
-      DiskTableHeader::MountPoint,
-      DiskTableHeader::Flags,
-      DiskTableHeader::ReadOnly,
-    ]
-  }
-  pub fn partition_table_headers() -> Vec<Self> {
-    vec![
+  pub fn partition_table_headers() -> &'static [Self] {
+    &[
       DiskTableHeader::Status,
       DiskTableHeader::Device,
       DiskTableHeader::Label,
@@ -1548,8 +1363,8 @@ impl DiskTableHeader {
       DiskTableHeader::Flags,
     ]
   }
-  pub fn disk_table_headers() -> Vec<Self> {
-    vec![
+  pub fn disk_table_headers() -> &'static [Self] {
+    &[
       DiskTableHeader::Device,
       DiskTableHeader::Size,
       DiskTableHeader::ReadOnly,
@@ -1563,12 +1378,6 @@ impl DiskTableHeader {
   }
   pub fn partition_table_header_info() -> Vec<(String, Constraint)> {
     Self::partition_table_headers()
-      .iter()
-      .map(|h| h.header_info())
-      .collect()
-  }
-  pub fn all_header_info() -> Vec<(String, Constraint)> {
-    Self::all_headers()
       .iter()
       .map(|h| h.header_info())
       .collect()

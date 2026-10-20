@@ -1,25 +1,17 @@
-use std::{env, io, path::{Path, PathBuf}};
+use std::{env, io, path::Path};
 
 use clap::Parser;
 use core::{
-  internal::config::{install_config, read_config},
   functions::locale::set_keyboard_live,
+  internal::config::{install_config, read_config},
 };
-use log::{debug, info, warn};
-use shared::{
-  args::{Cli, ConfigInput},
-  exec::check_if_root,
-  logging,
-};
-use ratatui::crossterm::event::{self, Event};
+use log::{debug, info};
+use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::{
   Terminal,
   crossterm::{
     execute,
-    terminal::{
-      Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-      enable_raw_mode,
-    },
+    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
   },
   layout::Alignment,
   prelude::CrosstermBackend,
@@ -27,15 +19,26 @@ use ratatui::{
   text::Line,
   widgets::Paragraph,
 };
+use shared::{
+  args::{Cli, ConfigInput},
+  exec::check_if_root,
+  logging,
+};
 use std::time::{Duration, Instant};
 
-use crate::installer::{AgeVerification, Installer, KeyboardLayout, Menu, Page, Signal};
+use crate::installer::{AgeVerification, Installer, ListKind, ListPage, Menu, Page, Signal};
 
-pub mod drives;
-pub mod installer;
+mod drives;
+mod installer;
 #[macro_use]
-pub mod macros;
-pub mod widget;
+mod macros;
+mod widget;
+
+const LOG_PATH: &str = "/tmp/dory.log";
+/// Redraw interval for pages that animate (progress spinner, ticker).
+const TICK_RATE: Duration = Duration::from_millis(100);
+/// Poll interval for idle pages: only needed to notice a terminal resize.
+const IDLE_POLL: Duration = Duration::from_secs(1);
 
 type LineStyle = Option<(Color, Modifier)>;
 pub fn styled_block<'a>(lines: Vec<Vec<(LineStyle, impl ToString)>>) -> Vec<Line<'a>> {
@@ -63,24 +66,17 @@ struct RawModeGuard;
 
 impl RawModeGuard {
   fn new(stdout: &mut io::Stdout) -> anyhow::Result<Self> {
-    // Enable raw mode to capture all keyboard input directly
     enable_raw_mode()?;
-
-    // Special handling for "linux" terminal (e.g., TTY console)
-    // In dumb terminals, entering alternate screen doesn't auto-clear,
-    // so we need to explicitly clear to avoid rendering artifacts
+    // In the "linux" console entering the alternate screen doesn't clear,
+    // so clear explicitly to avoid rendering artifacts.
     if let Ok("linux") = env::var("TERM").as_deref() {
       execute!(stdout, Clear(ClearType::All))?;
     }
-
-    // Enter alternate screen buffer to preserve user's terminal content
     execute!(stdout, EnterAlternateScreen)?;
     Ok(Self)
   }
 }
 
-/// Cleanup terminal state when the guard is dropped
-/// This ensures proper restoration even if the program panics
 impl Drop for RawModeGuard {
   fn drop(&mut self) {
     // Ignore errors during cleanup - we're likely panicking or shutting down
@@ -89,27 +85,14 @@ impl Drop for RawModeGuard {
   }
 }
 
+type Term = Terminal<CrosstermBackend<io::Stdout>>;
+
 fn main() -> anyhow::Result<()> {
-  if env::args().any(|arg| arg == "--version") {
-    let version = env!("CARGO_PKG_VERSION");
-    println!("dory version {version}");
-    return Ok(());
-  }
-
-  // Set up panic handler to gracefully restore terminal state
-  // This prevents leaving the user's terminal in an unusable state
-  // if the installer crashes unexpectedly
+  // Restore the terminal if the installer panics, so the user is not left
+  // with a raw-mode console.
   std::panic::set_hook(Box::new(|panic_info| {
-    use ratatui::crossterm::{
-      execute,
-      terminal::{LeaveAlternateScreen, disable_raw_mode},
-    };
-
-    // Attempt to restore terminal state - ignore errors since we're panicking
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen);
-
-    // Print user-friendly panic information to stderr
     eprintln!("====================================================");
     eprintln!("ATHENA OS INSTALLER PANIC - Terminal state restored!");
     eprintln!("====================================================");
@@ -118,7 +101,6 @@ fn main() -> anyhow::Result<()> {
   }));
 
   let cli = Cli::parse();
-  let log_path = "/tmp/dory.log".to_owned();
 
   // --- Live-environment keymap mode -----------------------------------------
   // `--set-keymap`       -> launch the TUI picker, apply on exit
@@ -126,24 +108,18 @@ fn main() -> anyhow::Result<()> {
   if let Some(value) = cli.set_keymap.as_deref() {
     check_if_root();
     if value.is_empty() {
-      // Interactive: spin up the same TUI runtime, but with KeyboardLayout
-      // as the only page. We collect the choice inside the TUI scope, drop
-      // the raw-mode guard so the terminal is fully restored, THEN apply +
-      // print on the real screen (otherwise println! lands on the alt-screen
-      // and is wiped on exit).
+      // Collect the choice inside the TUI scope, drop the raw-mode guard so
+      // the terminal is fully restored, THEN apply + print on the real screen.
       let mut stdout = io::stdout();
       let selected: Option<String> = {
         let _raw_guard = RawModeGuard::new(&mut stdout)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
         run_keymap_picker(&mut terminal)?
-      }; // <- raw_guard drops here; terminal restored
+      };
       if let Some(id) = selected {
-        let km = set_keyboard_live(&id).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let km = set_keyboard_live(&id)?;
         // Mirror the `motd` alias: clear the screen, then render /etc/issue
-        // with its escape sequences interpreted. The `if let Ok(...)` plays
-        // the same role as `[ -r /etc/issue ]` in the alias -- silently skip
-        // if the file is missing or unreadable.
+        // with its escape sequences interpreted.
         print!("\x1b[2J\x1b[H");
         if let Ok(contents) = std::fs::read_to_string("/etc/issue") {
           print!("{}", contents.replace(r"\e", "\x1b"));
@@ -155,52 +131,69 @@ fn main() -> anyhow::Result<()> {
       }
       return Ok(());
     }
-    let km = set_keyboard_live(value).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let km = set_keyboard_live(value)?;
     println!("Keyboard layout set to: {} ({})", km.label, km.console);
     return Ok(());
   }
 
-  let mut sources: Vec<ConfigInput> = Vec::new();
-  sources.extend(cli.system_file.iter().cloned().map(ConfigInput::File));
-  sources.extend(cli.drives_file.iter().cloned().map(ConfigInput::File));
-  
-  check_if_root(); // check_if_root must be before logging::init otherwise it does not spawn the sudo need error msg
-  logging::init(cli.verbose, &log_path);
+  let sources: Vec<ConfigInput> = cli
+    .system_file
+    .iter()
+    .chain(cli.drives_file.iter())
+    .cloned()
+    .map(ConfigInput::File)
+    .collect();
+  let cli_mode = !sources.is_empty();
+
+  // check_if_root must come before logging::init so the error is printed plainly.
+  check_if_root();
+  // Echo the log to stderr only in CLI mode: in the TUI it would draw over the frame.
+  logging::init(cli.verbose, LOG_PATH, cli_mode);
   debug!("Logger initialized. Verbose: {}", cli.verbose);
 
-  if !sources.is_empty() {
-      if cli.dry {
-          let _cfg = read_config(&sources);
-          info!("Config validated (dry run).");
-      } else {
-          // If config files are provided by cli, run immediately install_config function to install the system
-          let exit_code = install_config(&sources, log_path);
-          if exit_code != 0 {
-              anyhow::bail!("Installation failed with exit code {exit_code}"); // <- I use anyhow::bail! to trigger the TUI window of installation failed
-          }
-          else {
-              info!("Installation finished! You may reboot now!");
-          }
+  if cli_mode {
+    if cli.dry {
+      let _cfg = read_config(&sources);
+      info!("Config validated (dry run).");
+    } else {
+      let exit_code = install_config(&sources, LOG_PATH);
+      if exit_code != 0 {
+        anyhow::bail!("Installation failed with exit code {exit_code}");
       }
-      return Ok(()); // <-- important: don't fall through to TUI
+      info!("Installation finished! You may reboot now!");
+    }
+    return Ok(());
   }
-  
+
   // TUI path: no config files provided, launch the interactive installer
   let mut stdout = io::stdout();
   let res = {
     let _raw_guard = RawModeGuard::new(&mut stdout)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     debug!("Running TUI");
-    run_app(
-        &mut terminal,
-        log_path.into(),
-    )
+    run_app(&mut terminal, Path::new(LOG_PATH))
   };
-
   debug!("Exiting TUI");
-
   res
+}
+
+/// Draw the one-line header shared by both TUI entry points.
+fn render_header(f: &mut ratatui::Frame, title: &str) -> ratatui::layout::Rect {
+  let chunks = split_vert!(f.area(), 0, [Constraint::Length(1), Constraint::Min(0)]);
+  let header = split_hor!(
+    chunks[0],
+    0,
+    [Constraint::Percentage(33), Constraint::Percentage(34), Constraint::Percentage(33)]
+  );
+  let help_text = Paragraph::new("Press '?' for help")
+    .style(Style::default().fg(Color::Gray))
+    .alignment(Alignment::Center);
+  f.render_widget(help_text, header[0]);
+  let title = Paragraph::new(title)
+    .style(Style::default().add_modifier(Modifier::BOLD))
+    .alignment(Alignment::Center);
+  f.render_widget(title, header[1]);
+  chunks[1]
 }
 
 /// Processes signals from UI pages to control navigation and installer actions
@@ -212,10 +205,7 @@ fn handle_signal(
   log_path: &Path,
 ) -> anyhow::Result<bool> {
   match signal {
-    Signal::Wait => {
-      // No-op
-      Ok(false)
-    }
+    Signal::Wait => Ok(false),
     Signal::Push(new_page) => {
       page_stack.push(new_page);
       Ok(false)
@@ -233,235 +223,108 @@ fn handle_signal(
       Ok(false)
     }
     Signal::Unwind => {
-      while page_stack.len() > 1 {
-        page_stack.pop();
-      }
+      page_stack.truncate(1);
       Ok(false)
     }
     Signal::Quit => {
       debug!("Quit signal received");
-      Ok(true) // tell caller to exit
+      Ok(true)
     }
     Signal::WriteCfg => {
-      use std::io::Write;
-      use serde_json::{json, to_string_pretty, to_writer_pretty, Value};
-      use tempfile::NamedTempFile;
-
       debug!("WriteCfg signal received - starting installation process");
-
-      // Generate from in-memory installer
-      let config_json = installer.to_json()?;
-      debug!(
-        "Generated full config JSON:\n{}",
-        to_string_pretty(&config_json)?
-      );
-
-      let (system_v, drives_v) = match &config_json {
-        Value::Object(map) => (
-          map.get("config").cloned().unwrap_or(Value::Null),
-          map.get("drives").cloned().unwrap_or(Value::Null),
-        ),
-        _ => (Value::Null, Value::Null),
-      };
-
-      if system_v.is_null() {
-        warn!("No 'config' section found; writing null to system_cfg.");
-      }
-      if drives_v.is_null() {
-        warn!("No 'drives' section found; writing null to disko_cfg.");
-      }
-
-      let mut system_cfg = NamedTempFile::new()?;
-      to_writer_pretty(&mut system_cfg, &json!({ "config": system_v }))?;
-      system_cfg.write_all(b"\n")?;
-      system_cfg.flush()?;
-      debug!("Wrote system_cfg at {}", system_cfg.path().display());
-
-      let mut disko_cfg = NamedTempFile::new()?;
-      to_writer_pretty(&mut disko_cfg, &json!({ "drives": drives_v }))?;
-      disko_cfg.write_all(b"\n")?;
-      disko_cfg.flush()?;
-      debug!("Wrote disko_cfg at {}", disko_cfg.path().display());
-
-      page_stack.push(Box::new(AgeVerification::new(
-        installer.clone(),
-        system_cfg,
-        disko_cfg,
-        log_path.to_path_buf(),
-      )));
-
+      let (system_cfg, disko_cfg) = installer.write_config_files()?;
+      page_stack.push(Box::new(AgeVerification::new(system_cfg, disko_cfg, log_path.to_path_buf())));
       Ok(false)
     }
-    Signal::Error(err) => Err(anyhow::anyhow!("{err}")),
+    Signal::Error(err) => Err(err),
   }
 }
 
-/// Main TUI event loop that manages the installer interface
-///
-/// This function implements a page-based navigation system using a stack:
-/// - Pages are pushed/popped based on user navigation
-/// - Each page can send signals to control the overall application flow
-/// - The event loop handles both user input and periodic updates (ticks)
-pub fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    log_path: PathBuf,
-) -> anyhow::Result<()> {
-  let mut installer = Installer::new();
-  let mut page_stack: Vec<Box<dyn Page>> = vec![];
-  page_stack.push(Box::new(Menu::new()));
+/// Wait for input. Animated pages are redrawn every `TICK_RATE`; idle pages
+/// only when a key arrives (or once a second to pick up resizes).
+fn next_key(animated: bool, last_tick: &mut Instant) -> anyhow::Result<Option<event::KeyEvent>> {
+  let timeout = if animated {
+    TICK_RATE.checked_sub(last_tick.elapsed()).unwrap_or(Duration::ZERO)
+  } else {
+    IDLE_POLL
+  };
+  let key = if event::poll(timeout)? {
+    match event::read()? {
+      // Key-release/repeat events (kitty protocol, Windows) must not double-trigger.
+      Event::Key(key) if key.kind == KeyEventKind::Press => Some(key),
+      _ => None,
+    }
+  } else {
+    None
+  };
+  if last_tick.elapsed() >= TICK_RATE {
+    *last_tick = Instant::now();
+  }
+  Ok(key)
+}
 
-  // Set up timing for periodic updates (10 FPS)
-  let tick_rate = Duration::from_millis(100);
+/// Main TUI event loop: a page stack; each page renders, handles input and
+/// can emit signals that drive navigation.
+pub fn run_app(terminal: &mut Term, log_path: &Path) -> anyhow::Result<()> {
+  let mut installer = Installer::new();
+  let mut page_stack: Vec<Box<dyn Page>> = vec![Box::new(Menu::new())];
   let mut last_tick = Instant::now();
 
   loop {
-    // Render the current UI state
     terminal.draw(|f| {
-      let chunks = split_vert!(
-        f.area(),
-        0,
-        [
-          Constraint::Length(1), // Header height
-          Constraint::Min(0),    // Rest of screen
-        ]
-      );
-
-      // Create three-column header: help text, title, and empty space
-      let header_chunks = split_hor!(
-        chunks[0],
-        0,
-        [
-          Constraint::Percentage(33), // Left: help text
-          Constraint::Percentage(34), // Center: application title
-          Constraint::Percentage(33), // Right: reserved for future use
-        ]
-      );
-
-      // Help text on left
-      let help_text = Paragraph::new("Press '?' for help")
-        .style(Style::default().fg(Color::Gray))
-        .alignment(Alignment::Center);
-      f.render_widget(help_text, header_chunks[0]);
-
-      // Title in center
-      let title = Paragraph::new("Install Athena OS")
-        .style(Style::default().add_modifier(Modifier::BOLD))
-        .alignment(Alignment::Center);
-      f.render_widget(title, header_chunks[1]);
-
-      // Render the current page (top of the navigation stack)
+      let body = render_header(f, "Install Athena OS");
       if let Some(page) = page_stack.last_mut() {
-        page.render(&mut installer, f, chunks[1]);
+        page.render(&mut installer, f, body);
       }
     })?;
 
-    // Check if the current page has sent any signals
-    // Signals control navigation, installation, and application lifecycle
+    // Pages can emit a signal without input (e.g. installation finished).
     if let Some(page) = page_stack.last()
       && let Some(signal) = page.signal()
-      && handle_signal(signal, &mut page_stack, &mut installer, &log_path)?
+      && handle_signal(signal, &mut page_stack, &mut installer, log_path)?
     {
-      // handle_signal returned true, meaning we should quit
       break;
     }
 
-    // Calculate remaining time until next tick
-    let timeout = tick_rate
-      .checked_sub(last_tick.elapsed())
-      .unwrap_or_else(|| Duration::from_secs(0));
-
-    // Wait for user input or timeout
-    if event::poll(timeout)?
-		&& let Event::Key(key) = event::read()? {
-			if let Some(page) = page_stack.last_mut() {
-				// Forward keyboard input to the current page
-				let signal = page.handle_input(&mut installer, key);
-
-				if handle_signal(signal, &mut page_stack, &mut installer, &log_path)? {
-					// Page requested application quit
-					break;
-				}
-			} else {
-				// Safety fallback: if no pages exist, return to main menu
-				page_stack.push(Box::new(Menu::new()));
-			}
-		}
-
-    if last_tick.elapsed() >= tick_rate {
-      last_tick = Instant::now();
+    let animated = page_stack.last().is_some_and(|p| p.needs_tick());
+    if let Some(key) = next_key(animated, &mut last_tick)? {
+      let Some(page) = page_stack.last_mut() else {
+        page_stack.push(Box::new(Menu::new()));
+        continue;
+      };
+      let signal = page.handle_input(&mut installer, key);
+      if handle_signal(signal, &mut page_stack, &mut installer, log_path)? {
+        break;
+      }
     }
   }
-
   Ok(())
 }
 
-/// Standalone TUI loop for the `--set-keymap` flag.
-///
-/// Mirrors `run_app` but pushes `KeyboardLayout` as the only page. When the
-/// page signals `Pop` (Enter pressed on a layout) or `Quit`, we exit the loop
-/// and return the chosen keymap ID -- the caller in `main` is responsible for
-/// applying it after the TUI guard has dropped, so the success message lands
-/// on the real terminal instead of the alt-screen.
-///
-/// `Installer` is still constructed because `KeyboardLayout::handle_input`
-/// writes the selection into `installer.keyboard_layout` -- this is what
-/// guarantees zero behavioural drift between this entry point and the normal
-/// install flow.
-pub fn run_keymap_picker(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-) -> anyhow::Result<Option<String>> {
+/// Standalone TUI loop for the `--set-keymap` flag: `KeyboardLayout` is the
+/// only page. Returns the chosen keymap id once the user confirms.
+pub fn run_keymap_picker(terminal: &mut Term) -> anyhow::Result<Option<String>> {
   let mut installer = Installer::new();
-  let mut page: Box<dyn Page> = Box::new(KeyboardLayout::new());
-
-  let tick_rate = Duration::from_millis(100);
+  let mut page: Box<dyn Page> = Box::new(ListPage::new(ListKind::KeyboardLayout, &installer));
   let mut last_tick = Instant::now();
   let mut user_confirmed = false;
 
   loop {
     terminal.draw(|f| {
-      let chunks = split_vert!(
-        f.area(), 0,
-        [
-          Constraint::Length(1),
-          Constraint::Min(0),
-        ]
-      );
-      let header_chunks = split_hor!(
-        chunks[0], 0,
-        [
-          Constraint::Percentage(33),
-          Constraint::Percentage(34),
-          Constraint::Percentage(33),
-        ]
-      );
-      let help_text = Paragraph::new("Press '?' for help")
-        .style(Style::default().fg(Color::Gray))
-        .alignment(Alignment::Center);
-      f.render_widget(help_text, header_chunks[0]);
-      let title = Paragraph::new("Athena OS - Set Keyboard Layout")
-        .style(Style::default().add_modifier(Modifier::BOLD))
-        .alignment(Alignment::Center);
-      f.render_widget(title, header_chunks[1]);
-
-      page.render(&mut installer, f, chunks[1]);
+      let body = render_header(f, "Athena OS - Set Keyboard Layout");
+      page.render(&mut installer, f, body);
     })?;
 
-    let timeout = tick_rate
-      .checked_sub(last_tick.elapsed())
-      .unwrap_or_else(|| Duration::from_secs(0));
-
-    if event::poll(timeout)?
-      && let Event::Key(key) = event::read()? {
-        match page.handle_input(&mut installer, key) {
-          Signal::Pop => { user_confirmed = true; break; }   // Enter on a layout
-          Signal::Quit | Signal::Unwind => break,            // user cancelled
-          Signal::Error(err) => return Err(anyhow::anyhow!("{err}")),
-          _ => {} // Wait / Push (e.g. help modal) / etc.: keep looping
+    if let Some(key) = next_key(page.needs_tick(), &mut last_tick)? {
+      match page.handle_input(&mut installer, key) {
+        Signal::Pop => {
+          user_confirmed = true;
+          break;
         }
+        Signal::Quit | Signal::Unwind => break,
+        Signal::Error(err) => return Err(err),
+        _ => {}
       }
-
-    if last_tick.elapsed() >= tick_rate {
-      last_tick = Instant::now();
     }
   }
 

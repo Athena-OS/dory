@@ -2,8 +2,8 @@ use rand::{prelude::IndexedRandom, RngExt};
 use std::{
   collections::VecDeque,
   fs::{File, OpenOptions},
-  io::{BufReader, Read, Seek, SeekFrom},
-  os::unix::process::ExitStatusExt,
+  io::{Read, Seek, SeekFrom},
+  os::unix::{fs::MetadataExt, process::ExitStatusExt},
   path::PathBuf,
   process::{Child, Command, Stdio},
   time::{Duration, Instant},
@@ -14,169 +14,100 @@ use ansi_to_tui::IntoText;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use ratatui::{
   Frame,
-  crossterm::event::{KeyCode, KeyEvent},
+  crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
   layout::{Alignment, Constraint, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
   widgets::{
-    Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Table, TableState, Wrap,
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Table, TableState, Wrap,
   },
 };
 
 use crate::installer::Signal;
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
-/// Manages package selection with efficient fuzzy search and filtering
-///
-/// This widget provides a two-pane interface for selecting system packages:
-/// - Left pane: selected packages
-/// - Right pane: available packages with real-time fuzzy search
-///
-/// Performance optimizations:
-/// - Caches fuzzy search results to avoid re-computation
-/// - Uses BTreeMap for O(log n) lookups and sorted iteration
-/// - Maintains original package order for consistency
-#[derive(Debug, Clone)]
+/// Package selection model: one immutable, sorted list of names plus index
+/// sets. Nothing is cloned when filtering or moving packages between panes.
+#[derive(Debug, Clone, Default)]
 pub struct PackageManager {
-  // Maps package name -> original index in nixpkgs list
-  available: BTreeMap<String, usize>,
-  selected: BTreeMap<String, usize>,
-  // Original ordering from nixpkgs for restoration
-  _original_order: Vec<String>,
-  // Cache for filtered results - maps package name to (original_index, fuzzy_score)
-  last_filter: Option<String>,
-  cached_filtered: BTreeMap<String, (usize, i64)>, // package_name -> (original_index, fuzzy_score)
+  all: Vec<String>,
+  selected: BTreeSet<usize>,
+  /// Available (not selected) packages matching `filter`, best match first;
+  /// all available packages in order when there is no filter.
+  available: Vec<usize>,
+  filter: Option<String>,
 }
 
 impl PackageManager {
-  pub fn new(all_packages: Vec<String>, selected_packages: Vec<String>) -> Self {
-    let mut available = BTreeMap::new();
-    let mut selected = BTreeMap::new();
-
-    // Build the original order and available map
-    for (idx, package) in all_packages.iter().enumerate() {
-      available.insert(package.clone(), idx);
-    }
-
-    // Move pre-selected packages to selected map
-    for package in selected_packages {
-      if let Some(idx) = available.remove(&package) {
-        selected.insert(package, idx);
-      }
-    }
-
-    Self {
-      available,
-      selected,
-      _original_order: all_packages,
-      last_filter: None,
-      cached_filtered: BTreeMap::new(),
-    }
+  pub fn new(mut all_packages: Vec<String>, selected_packages: &[String]) -> Self {
+    all_packages.sort_unstable();
+    all_packages.dedup();
+    let selected = selected_packages
+      .iter()
+      .filter_map(|p| all_packages.binary_search(p).ok())
+      .collect();
+    let mut pm = Self { all: all_packages, selected, available: Vec::new(), filter: None };
+    pm.recompute();
+    pm
   }
 
-  pub fn move_to_selected(&mut self, package: &str) -> bool {
-    if let Some(idx) = self.available.remove(package) {
-      self.selected.insert(package.to_string(), idx);
-      // Update cached filtered map by removing the package
-      self.cached_filtered.remove(package);
-      true
-    } else {
-      false
-    }
-  }
-
-  pub fn move_to_available(&mut self, package: &str) -> bool {
-    if let Some(idx) = self.selected.remove(package) {
-      self.available.insert(package.to_string(), idx);
-      // If we have a cached filter, check if this package matches and add it back
-      if let Some(ref filter) = self.last_filter {
-        use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
+  fn recompute(&mut self) {
+    let avail = (0..self.all.len()).filter(|i| !self.selected.contains(i));
+    self.available = match &self.filter {
+      Some(f) => {
         let matcher = SkimMatcherV2::default();
-        if let Some(score) = matcher.fuzzy_match(package, filter) {
-          // Add to cached filtered map with both original index and fuzzy score
-          self
-            .cached_filtered
-            .insert(package.to_string(), (idx, score));
-        }
+        let mut scored: Vec<(usize, i64)> = avail
+          .filter_map(|i| matcher.fuzzy_match(&self.all[i], f).map(|score| (i, score)))
+          .collect();
+        scored.sort_unstable_by_key(|&(_, score)| std::cmp::Reverse(score));
+        scored.into_iter().map(|(i, _)| i).collect()
       }
-      true
-    } else {
-      false
+      None => avail.collect(),
+    };
+  }
+
+  pub fn set_filter(&mut self, filter: Option<String>) {
+    let filter = filter.filter(|f| !f.is_empty());
+    if filter != self.filter {
+      self.filter = filter;
+      self.recompute();
     }
   }
 
-  pub fn get_available_packages(&self) -> Vec<String> {
-    self.available.keys().cloned().collect()
+  /// Indices (into `names()`) of the available packages after filtering.
+  pub fn available(&self) -> &[usize] {
+    &self.available
+  }
+
+  /// Indices of the selected packages, sorted by name.
+  pub fn selected(&self) -> impl Iterator<Item = usize> + '_ {
+    self.selected.iter().copied()
+  }
+
+  pub fn selected_len(&self) -> usize {
+    self.selected.len()
+  }
+
+  pub fn name(&self, idx: usize) -> &str {
+    &self.all[idx]
+  }
+
+  pub fn select(&mut self, idx: usize) {
+    if self.selected.insert(idx) {
+      self.available.retain(|&i| i != idx);
+    }
+  }
+
+  pub fn deselect(&mut self, idx: usize) {
+    if self.selected.remove(&idx) {
+      // Keep ordering consistent with the filter rather than inserting ad hoc.
+      self.recompute();
+    }
   }
 
   pub fn get_selected_packages(&self) -> Vec<String> {
-    self.selected.keys().cloned().collect()
-  }
-
-  /// Filter available packages using fuzzy matching with caching
-  ///
-  /// Returns packages sorted by relevance score (best matches first)
-  /// Caches results to avoid expensive recomputation on repeated searches
-  pub fn get_available_filtered(&mut self, filter: &str) -> Vec<String> {
-    // Check if we can reuse cached results
-    if let Some(ref last_filter) = self.last_filter
-      && last_filter == filter {
-        return self.get_sorted_by_score_from_cache();
-      }
-
-    // Need to recompute fuzzy matches
-    use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
-    let matcher = SkimMatcherV2::default();
-
-    let mut filtered_map = BTreeMap::new();
-    for (package, &original_idx) in &self.available {
-      if let Some(score) = matcher.fuzzy_match(package, filter) {
-        filtered_map.insert(package.clone(), (original_idx, score));
-      }
-    }
-
-    // Cache the results for future use
-    self.last_filter = Some(filter.to_string());
-    self.cached_filtered = filtered_map;
-
-    self.get_sorted_by_score_from_cache()
-  }
-
-  /// Get packages from cache sorted by fuzzy match score (best matches first)
-  ///
-  /// Uses negative score for descending sort (higher scores = better matches)
-  fn get_sorted_by_score_from_cache(&self) -> Vec<String> {
-    let mut packages_with_score: Vec<_> = self
-      .cached_filtered
-      .iter()
-      .map(|(package, &(_, score))| (package.clone(), score))
-      .collect();
-    packages_with_score.sort_by_key(|(_, score)| -score); // Negative for descending order
-    packages_with_score
-      .into_iter()
-      .map(|(package, _)| package)
-      .collect()
-  }
-
-  pub fn contains_available(&self, package: &str) -> bool {
-    self.available.contains_key(package)
-  }
-
-  pub fn contains_selected(&self, package: &str) -> bool {
-    self.selected.contains_key(package)
-  }
-
-  /// Get current available packages, respecting any active filter
-  ///
-  /// Returns filtered results if a search is active, otherwise all available
-  /// packages
-  pub fn get_current_available(&self) -> Vec<String> {
-    if self.last_filter.is_some() {
-      self.get_sorted_by_score_from_cache()
-    } else {
-      self.get_available_packages()
-    }
+    self.selected.iter().map(|&i| self.all[i].clone()).collect()
   }
 }
 
@@ -203,7 +134,6 @@ pub struct WidgetBoxBuilder {
   title: Option<String>,
   layout: Option<Layout>,
   widgets: Vec<Box<dyn ConfigWidget>>,
-  input_callback: Option<InputCallbackWidget>,
   render_borders: Option<bool>,
 }
 
@@ -213,13 +143,8 @@ impl WidgetBoxBuilder {
       title: None,
       layout: None,
       widgets: vec![],
-      input_callback: None,
       render_borders: None,
     }
-  }
-  pub fn title(mut self, title: impl Into<String>) -> Self {
-    self.title = Some(title.into());
-    self
   }
   pub fn layout(mut self, layout: Layout) -> Self {
     self.layout = Some(layout);
@@ -227,14 +152,6 @@ impl WidgetBoxBuilder {
   }
   pub fn children(mut self, widgets: Vec<Box<dyn ConfigWidget>>) -> Self {
     self.widgets = widgets;
-    self
-  }
-  pub fn input_callback(mut self, callback: InputCallbackWidget) -> Self {
-    self.input_callback = Some(callback);
-    self
-  }
-  pub fn render_borders(mut self, render: bool) -> Self {
-    self.render_borders = Some(render);
     self
   }
   /// Generate a default horizontal layout that splits space evenly among
@@ -268,7 +185,6 @@ impl WidgetBoxBuilder {
       title,
       layout,
       self.widgets,
-      self.input_callback,
       render_borders,
     )
   }
@@ -280,14 +196,12 @@ impl Default for WidgetBoxBuilder {
   }
 }
 
-pub type InputCallbackWidget = Box<dyn FnMut(&mut dyn ConfigWidget, KeyEvent) -> Signal>;
 pub struct WidgetBox {
   pub focused: bool,
   pub focused_child: Option<usize>,
   pub title: String,
   pub layout: Layout,
   pub widgets: Vec<Box<dyn ConfigWidget>>,
-  pub input_callback: Option<InputCallbackWidget>,
   pub render_borders: bool,
 }
 
@@ -296,7 +210,6 @@ impl WidgetBox {
     title: String,
     layout: Layout,
     widgets: Vec<Box<dyn ConfigWidget>>,
-    input_callback: Option<InputCallbackWidget>,
     render_borders: bool,
   ) -> Self {
     Self {
@@ -305,7 +218,6 @@ impl WidgetBox {
       title,
       layout,
       widgets,
-      input_callback,
       render_borders,
     }
   }
@@ -477,9 +389,6 @@ impl CheckBox {
   pub fn toggle(&mut self) {
     self.checked = !self.checked;
   }
-  pub fn is_checked(&self) -> bool {
-    self.checked
-  }
 }
 
 impl ConfigWidget for CheckBox {
@@ -598,21 +507,23 @@ pub struct LineEditor {
   pub placeholder: Option<String>,
   pub is_secret: bool,
   pub title: String,
-  pub value: String,
+  /// Text buffer as chars so cursor arithmetic is Unicode-safe.
+  chars: Vec<char>,
   pub error: Option<String>,
+  /// Cursor position in *characters* (0..=chars.len()).
   pub cursor: usize,
 }
 
+const PLACEHOLDER_FG: Color = Color::Indexed(242);
+
 impl LineEditor {
   pub fn new(title: impl ToString, placeholder: Option<impl ToString>) -> Self {
-    let title = title.to_string();
-    let placeholder = placeholder.map(|p| p.to_string());
     Self {
       focused: false,
-      placeholder,
-      title,
+      placeholder: placeholder.map(|p| p.to_string()),
+      title: title.to_string(),
       is_secret: false,
-      value: String::new(),
+      chars: Vec::new(),
       error: None,
       cursor: 0,
     }
@@ -621,154 +532,77 @@ impl LineEditor {
     self.is_secret = is_secret;
     self
   }
+  /// Current text.
+  pub fn value(&self) -> String {
+    self.chars.iter().collect()
+  }
+  fn placeholder_style(&self, highlight: bool) -> Style {
+    let style = Style::default().fg(PLACEHOLDER_FG).add_modifier(Modifier::ITALIC);
+    if highlight { style.bg(Color::Gray) } else { style }
+  }
   fn get_placeholder_line(&self, focused: bool) -> Line<'_> {
-    if let Some(placeholder) = &self.placeholder {
-      if placeholder.is_empty() {
-        if focused {
-          let span = Span::styled(
-            " ",
-            Style::default()
-              .fg(Color::Indexed(242)) // Better Gray
-              .bg(Color::Gray)
-              .add_modifier(Modifier::ITALIC),
-          );
-          Line::from(span)
-        } else {
-          let span = Span::styled(
-            " ",
-            Style::default()
-              .fg(Color::Indexed(242))
-              .add_modifier(Modifier::ITALIC),
-          );
-          Line::from(span)
-        }
-      } else {
-        let first_char = placeholder.chars().next().unwrap_or(' ');
-        let rest = &placeholder[first_char.len_utf8()..];
-        let first_char_span = if focused {
-          Span::styled(
-            first_char.to_string(),
-            Style::default()
-              .fg(Color::Indexed(242))
-              .bg(Color::Gray)
-              .add_modifier(Modifier::ITALIC),
-          )
-        } else {
-          Span::styled(
-            first_char.to_string(),
-            Style::default()
-              .fg(Color::Indexed(242))
-              .add_modifier(Modifier::ITALIC),
-          )
-        };
-        let rest_span = Span::styled(
-          rest.to_string(),
-          Style::default()
-            .fg(Color::Indexed(242))
-            .add_modifier(Modifier::ITALIC),
-        );
-        Line::from(vec![first_char_span, rest_span])
+    match self.placeholder.as_deref() {
+      Some(placeholder) if !placeholder.is_empty() => {
+        let mut it = placeholder.chars();
+        let first = it.next().unwrap_or(' ').to_string();
+        let rest: String = it.collect();
+        Line::from(vec![
+          Span::styled(first, self.placeholder_style(focused)),
+          Span::styled(rest, self.placeholder_style(false)),
+        ])
       }
-    } else {
-      let span = Span::styled(
-        " ",
-        Style::default()
-          .fg(Color::Indexed(242))
-          .bg(Color::Gray)
-          .add_modifier(Modifier::ITALIC),
-      );
-      Line::from(span)
+      _ => Line::from(Span::styled(" ", self.placeholder_style(true))),
     }
+  }
+  fn shown(&self, c: char) -> char {
+    if self.is_secret { '*' } else { c }
   }
   fn render_line(&self) -> Line<'_> {
     if !self.focused {
-      if self.is_secret {
-        let masked = "*".repeat(self.value.chars().count());
-        let span = Span::raw(masked);
-        return Line::from(span);
-      } else if !self.value.is_empty() {
-        let span = Span::raw(self.value.clone());
-        return Line::from(span);
-      } else {
+      if self.chars.is_empty() {
         return Line::from(Span::raw(" "));
       }
+      return Line::from(Span::raw(self.chars.iter().map(|&c| self.shown(c)).collect::<String>()));
     }
-
-    if self.value.is_empty() {
+    if self.chars.is_empty() {
       return self.get_placeholder_line(true);
     }
 
-    let mut left = String::new();
-    let mut cursor_char = None;
-    let mut right = String::new();
+    let cursor = self.cursor.min(self.chars.len());
+    let left: String = self.chars[..cursor].iter().map(|&c| self.shown(c)).collect();
+    let cursor_char = self.chars.get(cursor).map_or(" ".to_string(), |&c| self.shown(c).to_string());
+    let right: String = self.chars.get(cursor + 1..).unwrap_or(&[]).iter().map(|&c| self.shown(c)).collect();
 
-    for (i, c) in self.value.chars().enumerate() {
-      if i == self.cursor {
-        if self.is_secret {
-          cursor_char = Some('*');
-        } else {
-          cursor_char = Some(c);
-        }
-      } else if i < self.cursor {
-        if self.is_secret {
-          left.push('*');
-        } else {
-          left.push(c);
-        }
-      } else if self.is_secret {
-        right.push('*');
-      } else {
-        right.push(c);
-      }
-    }
-
-    if self.focused {
-      Line::from(vec![
-        Span::raw(left),
-        Span::styled(
-          cursor_char.map_or(" ".to_string(), |c| c.to_string()),
-          Style::default().add_modifier(Modifier::REVERSED),
-        ),
-        Span::raw(right),
-      ])
-    } else {
-      Line::from(vec![
-        Span::raw(left),
-        Span::raw(cursor_char.map_or(" ".to_string(), |c| c.to_string())),
-        Span::raw(right),
-      ])
-    }
+    Line::from(vec![
+      Span::raw(left),
+      Span::styled(cursor_char, Style::default().add_modifier(Modifier::REVERSED)),
+      Span::raw(right),
+    ])
   }
   fn as_widget(&self) -> Paragraph<'_> {
     Paragraph::new(self.render_line()).block(
       Block::default()
-        .title(self.title.clone())
+        .title(self.title.as_str())
         .borders(Borders::ALL),
     )
   }
   pub fn clear(&mut self) {
-    self.value.clear();
+    self.chars.clear();
     self.cursor = 0;
-    self.error = None;
-  }
-  pub fn set_value(&mut self, value: impl ToString) {
-    self.value = value.to_string();
-    if self.cursor > self.value.len() {
-      self.cursor = self.value.len();
-    }
     self.error = None;
   }
   /// Set an error message without clearing the field.
   pub fn set_error(&mut self, msg: impl ToString) {
-      self.error = Some(msg.to_string());
+    self.error = Some(msg.to_string());
   }
   /// Clear any error message.
   pub fn clear_error(&mut self) {
-      self.error = None;
+    self.error = None;
   }
+  /// Set an error message and clear the field.
   pub fn error(&mut self, msg: impl ToString) {
     self.error = Some(msg.to_string());
-    self.value.clear();
+    self.chars.clear();
     self.cursor = 0;
   }
 }
@@ -776,37 +610,22 @@ impl LineEditor {
 impl ConfigWidget for LineEditor {
   fn handle_input(&mut self, key: KeyEvent) -> Signal {
     match key.code {
-      KeyCode::Left
-        if self.cursor > 0 => {
-          self.cursor -= 1;
-        }
-      KeyCode::Right
-        if self.cursor < self.value.len() => {
-          self.cursor += 1;
-        }
-      KeyCode::Backspace
-        if self.cursor > 0 && !self.value.is_empty() => {
-          self.value.remove(self.cursor - 1);
-          self.cursor -= 1;
-        }
-      KeyCode::Delete
-        if self.cursor < self.value.len() && !self.value.is_empty() => {
-          self.value.remove(self.cursor);
-        }
-      KeyCode::Char(c) => {
-        self.value.insert(self.cursor, c);
+      KeyCode::Left if self.cursor > 0 => self.cursor -= 1,
+      KeyCode::Right if self.cursor < self.chars.len() => self.cursor += 1,
+      KeyCode::Backspace if self.cursor > 0 => {
+        self.chars.remove(self.cursor - 1);
+        self.cursor -= 1;
+      }
+      KeyCode::Delete if self.cursor < self.chars.len() => {
+        self.chars.remove(self.cursor);
+      }
+      KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+        self.chars.insert(self.cursor, c);
         self.cursor += 1;
       }
-      KeyCode::Home => {
-        self.cursor = 0;
-      }
-      KeyCode::End => {
-        self.cursor = self.value.len();
-      }
+      KeyCode::Home => self.cursor = 0,
+      KeyCode::End => self.cursor = self.chars.len(),
       _ => {}
-    }
-    if self.cursor > self.value.len() {
-      self.cursor = self.value.len();
     }
     Signal::Wait
   }
@@ -815,21 +634,17 @@ impl ConfigWidget for LineEditor {
     let chunks = split_vert!(area, 0, [Constraint::Min(3), Constraint::Length(3)]);
     if let Some(err) = &self.error {
       let error_paragraph = Paragraph::new(Span::styled(
-        err.clone(),
+        err.as_str(),
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-      ))
-      .block(Block::default());
+      ));
       f.render_widget(error_paragraph, chunks[1]);
     }
-    let paragraph = self.as_widget();
-    f.render_widget(paragraph, chunks[0]);
+    f.render_widget(self.as_widget(), chunks[0]);
   }
 
   fn focus(&mut self) {
     self.focused = true;
-    if self.cursor > self.value.len() {
-      self.cursor = self.value.len();
-    }
+    self.cursor = self.cursor.min(self.chars.len());
   }
 
   fn is_focused(&self) -> bool {
@@ -841,20 +656,18 @@ impl ConfigWidget for LineEditor {
   }
 
   fn get_value(&self) -> Option<Value> {
-    Some(Value::String(self.value.clone()))
+    Some(Value::String(self.value()))
   }
-}
-
-pub struct StrListItem {
-  pub idx: usize,
 }
 
 pub struct StrList {
   pub focused: bool,
   pub title: String,
   pub items: Vec<String>,
-  pub filtered_items: Vec<StrListItem>, // after filtering
+  /// Indices into `items` that pass the current filter, best match first.
+  pub filtered: Vec<usize>,
   pub filter: Option<String>,
+  /// Cursor position inside `filtered`.
   pub selected_idx: usize,
   pub committed_idx: Option<usize>,
   pub committed: Option<String>,
@@ -862,16 +675,10 @@ pub struct StrList {
 
 impl StrList {
   pub fn new(title: impl Into<String>, items: Vec<String>) -> Self {
-    let filtered_items = items
-      .iter()
-      .cloned()
-      .enumerate()
-      .map(|(i, _)| StrListItem { idx: i })
-      .collect();
     Self {
       focused: false,
       title: title.into(),
-      filtered_items,
+      filtered: (0..items.len()).collect(),
       items,
       filter: None,
       selected_idx: 0,
@@ -879,12 +686,12 @@ impl StrList {
       committed: None,
     }
   }
+  /// The item under the cursor (respects the active filter).
   pub fn selected_item(&self) -> Option<&String> {
-    let item_idx = self.filtered_items.get(self.selected_idx)?;
-    self.items.get(item_idx.idx)
+    self.items.get(*self.filtered.get(self.selected_idx)?)
   }
   pub fn next_item(&mut self) -> bool {
-    if self.selected_idx + 1 < self.filtered_items.len() {
+    if self.selected_idx + 1 < self.filtered.len() {
       self.selected_idx += 1;
       true
     } else {
@@ -903,240 +710,42 @@ impl StrList {
     self.selected_idx = 0;
   }
   pub fn last_item(&mut self) {
-    self.selected_idx = self.items.len().saturating_sub(1);
-  }
-  pub fn len(&self) -> usize {
-    self.items.len()
-  }
-  pub fn is_empty(&self) -> bool {
-    self.items.is_empty()
-  }
-  pub fn sort(&mut self) {
-    self.items.sort();
-    self.set_filter(self.filter.clone());
-  }
-  pub fn sort_by<F>(&mut self, mut compare: F)
-  where
-    F: FnMut(&String, &String) -> std::cmp::Ordering,
-  {
-    self.items.sort_by(|a, b| compare(a, b));
-    self.set_filter(self.filter.clone());
-  }
-  pub fn set_items(&mut self, items: Vec<String>) {
-    self.items = items;
-    if self.selected_idx >= self.items.len() {
-      self.selected_idx = self.items.len().saturating_sub(1);
-    }
-    self.set_filter(self.filter.clone());
+    self.selected_idx = self.filtered.len().saturating_sub(1);
   }
   pub fn set_filter(&mut self, filter: Option<impl Into<String>>) {
-    let matcher = SkimMatcherV2::default();
-    if let Some(f) = filter {
-      let f = f.into();
-      self.filter = Some(f.clone());
-      let mut results: Vec<_> = self
-        .items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| matcher.fuzzy_match(item, &f).map(|score| (i, score)))
-        .collect();
-      results.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
-      self.filtered_items = results
-        .into_iter()
-        .map(|(i, _)| StrListItem { idx: i })
-        .collect();
-    } else {
-      self.filter = None;
-      self.filtered_items = self
-        .items
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(i, _)| StrListItem { idx: i })
-        .collect();
+    match filter.map(Into::into).filter(|f| !f.is_empty()) {
+      Some(f) => {
+        let matcher = SkimMatcherV2::default();
+        let mut results: Vec<(usize, i64)> = self
+          .items
+          .iter()
+          .enumerate()
+          .filter_map(|(i, item)| matcher.fuzzy_match(item, &f).map(|score| (i, score)))
+          .collect();
+        results.sort_unstable_by_key(|&(_, score)| std::cmp::Reverse(score));
+        self.filtered = results.into_iter().map(|(i, _)| i).collect();
+        self.filter = Some(f);
+      }
+      None => {
+        self.filtered = (0..self.items.len()).collect();
+        self.filter = None;
+      }
     }
     self.selected_idx = 0;
-  }
-  pub fn push_item(&mut self, item: impl Into<String>) {
-    self.items.push(item.into());
-  }
-  pub fn push_unique(&mut self, item: impl Into<String>) -> bool {
-    let item = item.into();
-    if !self.items.contains(&item) {
-      self.push_item(item);
-      true
-    } else {
-      false
-    }
-  }
-  pub fn push_sort_unique(&mut self, item: impl Into<String>) -> bool {
-    let added = self.push_unique(item);
-    if added {
-      self.sort();
-    }
-    added
-  }
-  pub fn push_sort(&mut self, item: impl Into<String>) {
-    self.push_item(item);
-    self.sort();
-  }
-  pub fn add_item(&mut self, item: impl Into<String>) {
-    self.push_item(item);
-    self.set_filter(self.filter.clone());
-  }
-  pub fn remove_item(&mut self, idx: usize) -> Option<String> {
-    let idx = self.filtered_items.get(idx).map(|sli| sli.idx)?;
-    if idx < self.items.len() {
-      let item = self.items.remove(idx);
-      self.set_filter(self.filter.clone());
-      if self.selected_idx >= self.filtered_items.len() && !self.filtered_items.is_empty() {
-        self.selected_idx = self.filtered_items.len() - 1;
-      }
-      Some(item)
-    } else {
-      None
-    }
-  }
-  pub fn remove_selected(&mut self) -> Option<String> {
-    self.remove_item(self.selected_idx)
-  }
-}
-
-/// Optimized list widget that works with pre-sorted data and avoids expensive
-/// operations
-pub struct OptimizedStrList {
-  pub focused: bool,
-  pub title: String,
-  pub items: Vec<String>,
-  pub filter: Option<String>,
-  pub selected_idx: usize,
-}
-
-impl OptimizedStrList {
-  pub fn new(title: impl Into<String>, items: Vec<String>) -> Self {
-    Self {
-      focused: false,
-      title: title.into(),
-      items,
-      filter: None,
-      selected_idx: 0,
-    }
-  }
-
-  pub fn set_items(&mut self, items: Vec<String>) {
-    self.items = items;
-    if self.selected_idx >= self.items.len() {
-      self.selected_idx = self.items.len().saturating_sub(1);
-    }
-  }
-
-  pub fn selected_item(&self) -> Option<&String> {
-    self.items.get(self.selected_idx)
-  }
-
-  pub fn next_item(&mut self) -> bool {
-    if self.selected_idx + 1 < self.items.len() {
-      self.selected_idx += 1;
-      true
-    } else {
-      false
-    }
-  }
-
-  pub fn previous_item(&mut self) -> bool {
-    if self.selected_idx > 0 {
-      self.selected_idx -= 1;
-      true
-    } else {
-      false
-    }
-  }
-
-  pub fn len(&self) -> usize {
-    self.items.len()
-  }
-
-  pub fn is_empty(&self) -> bool {
-    self.items.is_empty()
-  }
-
-  pub fn focus(&mut self) {
-    self.focused = true;
-  }
-
-  pub fn unfocus(&mut self) {
-    self.focused = false;
-  }
-
-  pub fn is_focused(&self) -> bool {
-    self.focused
-  }
-}
-
-impl ConfigWidget for OptimizedStrList {
-  fn render(&self, f: &mut ratatui::Frame, area: ratatui::prelude::Rect) {
-    use ratatui::{
-      prelude::*,
-      widgets::{Block, Borders, List, ListItem, ListState},
-    };
-
-    let items: Vec<ListItem> = self
-      .items
-      .iter()
-      .map(|item| ListItem::new(item.as_str()))
-      .collect();
-
-    let border_color = if self.focused {
-      Color::Yellow
-    } else {
-      Color::Indexed(242)
-    };
-
-    let list = List::new(items)
-      .block(
-        Block::default()
-          .title(self.title.as_str())
-          .borders(Borders::ALL)
-          .border_style(Style::default().fg(border_color)),
-      )
-      .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
-
-    let mut state = ListState::default();
-    state.select(Some(self.selected_idx));
-
-    f.render_stateful_widget(list, area, &mut state);
-  }
-
-  fn handle_input(&mut self, _key: ratatui::crossterm::event::KeyEvent) -> super::Signal {
-    super::Signal::Wait
-  }
-
-  fn focus(&mut self) {
-    self.focused = true;
-  }
-
-  fn unfocus(&mut self) {
-    self.focused = false;
-  }
-
-  fn is_focused(&self) -> bool {
-    self.focused
   }
 }
 
 impl ConfigWidget for StrList {
   fn handle_input(&mut self, key: KeyEvent) -> Signal {
     match key.code {
-      KeyCode::Up | KeyCode::Char('k')
-        if self.selected_idx > 0 => {
-          self.selected_idx -= 1;
-        }
-      KeyCode::Down | KeyCode::Char('j')
-        if self.selected_idx + 1 < self.items.len() => {
-          self.selected_idx += 1;
-        }
+      KeyCode::Up | KeyCode::Char('k') => {
+        self.previous_item();
+      }
+      KeyCode::Down | KeyCode::Char('j') => {
+        self.next_item();
+      }
       KeyCode::Enter => {
-        self.committed = Some(self.items[self.selected_idx].clone());
+        self.committed = self.selected_item().cloned();
         self.committed_idx = Some(self.selected_idx);
       }
       _ => {}
@@ -1145,46 +754,29 @@ impl ConfigWidget for StrList {
   }
   fn render(&self, f: &mut Frame, area: Rect) {
     let items: Vec<ListItem> = self
-      .filtered_items
+      .filtered
       .iter()
       .enumerate()
-      .map(|(i, item)| {
-        let prefix = if Some(i) == self.committed_idx {
-          "> "
-        } else {
-          "  "
-        };
-        let idx = item.idx;
-        let item = &self.items[idx];
-        ListItem::new(Span::raw(format!("{prefix}{item}")))
+      .map(|(i, &idx)| {
+        let prefix = if Some(i) == self.committed_idx { "> " } else { "  " };
+        ListItem::new(Span::raw(format!("{prefix}{}", self.items[idx])))
       })
       .collect();
 
     let mut state = ListState::default();
     state.select(Some(self.selected_idx));
 
-    let list = if self.focused {
-      List::new(items)
-        .block(
-          Block::default()
-            .title(self.title.clone())
-            .borders(Borders::ALL),
-        )
-        .highlight_style(
-          Style::default()
-            .bg(Color::Cyan)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD),
-        )
+    let highlight = if self.focused {
+      Style::default()
+        .bg(Color::Cyan)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD)
     } else {
-      List::new(items)
-        .block(
-          Block::default()
-            .title(self.title.clone())
-            .borders(Borders::ALL),
-        )
-        .highlight_style(Style::default())
+      Style::default()
     };
+    let list = List::new(items)
+      .block(Block::default().title(self.title.as_str()).borders(Borders::ALL))
+      .highlight_style(highlight);
 
     f.render_stateful_widget(list, area, &mut state);
   }
@@ -1261,7 +853,6 @@ pub struct InstallSteps<'a> {
   pub title: String,
   pub commands: VecDeque<(Line<'a>, VecDeque<Command>)>,
   pub steps: Vec<(Line<'a>, StepStatus)>,
-  pub num_steps: usize,
   pub current_step_index: usize,
   pub throbber_state: ThrobberState,
   pub running: bool,
@@ -1281,13 +872,10 @@ impl<'a> InstallSteps<'a> {
       .iter()
       .map(|(line, _)| (line.clone(), StepStatus::Inactive))
       .collect();
-    let num_steps = commands.len();
-
     Self {
       title: title.into(),
       commands,
       steps,
-      num_steps,
       current_step_index: 0,
       throbber_state: ThrobberState::default(),
       running: false,
@@ -1295,20 +883,6 @@ impl<'a> InstallSteps<'a> {
       log_path: None,
       current_step_commands: None,
       current_command: None,
-    }
-  }
-
-  pub fn progress(&self) -> f64 {
-    if self.num_steps == 0 {
-      1.0
-    } else {
-      let num_completed = self
-        .steps
-        .iter()
-        .filter(|step| step.1 == StepStatus::Completed)
-        .count();
-
-      num_completed as f64 / self.num_steps as f64
     }
   }
 
@@ -1335,12 +909,9 @@ impl<'a> InstallSteps<'a> {
     // Get the next command from the current step
     if let Some(commands) = self.current_step_commands.as_mut()
       && let Some(mut cmd) = commands.pop_front() {
-        // Redirect all output to /dev/null
-        let null = std::fs::File::create("/dev/null")?;
-        cmd
-          .stdout(Stdio::from(null.try_clone()?))
-          .stderr(Stdio::from(null))
-          .stdin(Stdio::null());
+        // stdout/stderr are configured by whoever built the command (the
+        // installer redirects them to the log file); never read from the TTY.
+        cmd.stdin(Stdio::null());
 
         let child = cmd.spawn()?;
         self.current_command = Some(child);
@@ -1459,6 +1030,17 @@ impl<'a> InstallSteps<'a> {
   }
 }
 
+impl Drop for InstallSteps<'_> {
+  /// Never leave an installer child running after the UI goes away
+  /// (e.g. Ctrl+C on the progress page while partitioning).
+  fn drop(&mut self) {
+    if let Some(child) = self.current_command.as_mut() {
+      let _ = child.kill();
+      let _ = child.wait();
+    }
+  }
+}
+
 impl<'a> ConfigWidget for InstallSteps<'a> {
   fn handle_input(&mut self, _key: KeyEvent) -> Signal {
     Signal::Wait
@@ -1547,7 +1129,6 @@ pub struct TableWidget {
   pub focused: bool,
   pub selected_row: Option<usize>,
   pub title: String,
-  pub num_fields: usize,
   pub headers: Vec<String>,
   pub rows: Vec<Vec<String>>,
   pub widths: Vec<Constraint>,
@@ -1560,12 +1141,10 @@ impl TableWidget {
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
   ) -> Self {
-    let num_fields = headers.len();
     Self {
       focused: false,
       selected_row: None,
       title: title.into(),
-      num_fields,
       headers,
       rows,
       widths,
@@ -1652,9 +1231,6 @@ impl TableWidget {
   }
   pub fn len(&self) -> usize {
     self.rows.len()
-  }
-  pub fn is_empty(&self) -> bool {
-    self.rows.is_empty()
   }
 }
 
@@ -1757,10 +1333,6 @@ impl<'a> HelpModal<'a> {
     }
   }
 
-  pub fn show(&mut self) {
-    self.visible = true;
-  }
-
   pub fn hide(&mut self) {
     self.visible = false;
   }
@@ -1806,101 +1378,51 @@ impl<'a> HelpModal<'a> {
   }
 }
 
+/// Which pane of the package picker has keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerPane {
+  Search,
+  Selected,
+  Available,
+}
+
 /// Complete package selection interface with dual-pane layout
 ///
-/// Provides a sophisticated package picker with:
 /// - Left pane: currently selected packages
 /// - Right pane: available packages with fuzzy search
-/// - Search bar: real-time filtering
-/// - Help modal: keyboard shortcuts and usage instructions
-///
-/// Navigation:
-/// - Tab: switch between panes
-/// - /: focus search bar
-/// - Enter: add/remove packages
-/// - ?: show help
+/// - Tab: switch between panes, `/`: focus search, Enter: add/remove, `?`: help
 pub struct PackagePicker {
   pub focused: bool,
   pub package_manager: PackageManager,
-  pub selected: OptimizedStrList,
-  pub available: OptimizedStrList,
-  pub search_bar: LineEditor,
+  pane: PickerPane,
+  selected_cursor: usize,
+  available_cursor: usize,
+  title_selected: String,
+  title_available: String,
+  search_bar: LineEditor,
   help_modal: HelpModal<'static>,
-  pub current_filter: Option<String>,
 }
 
 impl PackagePicker {
   pub fn new(
     title_selected: &str,
     title_available: &str,
-    selected_pkgs: Vec<String>,
+    selected_pkgs: &[String],
     available_pkgs: Vec<String>,
   ) -> Self {
-    let package_manager = PackageManager::new(available_pkgs.clone(), selected_pkgs.clone());
-
-    let available =
-      OptimizedStrList::new(title_available, package_manager.get_available_packages());
-    let selected =
-      OptimizedStrList::new(title_selected, package_manager.get_selected_packages());
+    let package_manager = PackageManager::new(available_pkgs, selected_pkgs);
     let mut search_bar = LineEditor::new("Search", Some("Enter a package name..."));
-    search_bar.focus(); // <-- start with focus on the search bar
+    search_bar.focus();
 
+    let bold = Some((Color::Yellow, Modifier::BOLD));
     let help_content = crate::styled_block(vec![
-      vec![
-        (
-          Some((
-            ratatui::style::Color::Yellow,
-            ratatui::style::Modifier::BOLD,
-          )),
-          "Tab",
-        ),
-        (None, " - Switch between lists and search"),
-      ],
-      vec![
-        (
-          Some((
-            ratatui::style::Color::Yellow,
-            ratatui::style::Modifier::BOLD,
-          )),
-          "↑/↓, j/k",
-        ),
-        (None, " - Navigate package lists"),
-      ],
-      vec![
-        (
-          Some((
-            ratatui::style::Color::Yellow,
-            ratatui::style::Modifier::BOLD,
-          )),
-          "Enter",
-        ),
-        (None, " - Add/remove package to/from selection"),
-      ],
-      vec![
-        (
-          Some((
-            ratatui::style::Color::Yellow,
-            ratatui::style::Modifier::BOLD,
-          )),
-          "/",
-        ),
-        (None, " - Focus search bar"),
-      ],
-      vec![
-        (
-          Some((
-            ratatui::style::Color::Yellow,
-            ratatui::style::Modifier::BOLD,
-          )),
-          "?",
-        ),
-        (None, " - Show this help"),
-      ],
+      vec![(bold, "Tab"), (None, " - Switch between lists and search")],
+      vec![(bold, "↑/↓, j/k"), (None, " - Navigate package lists")],
+      vec![(bold, "Enter"), (None, " - Add/remove package to/from selection")],
+      vec![(bold, "/"), (None, " - Focus search bar")],
+      vec![(bold, "?"), (None, " - Show this help")],
       vec![(None, "")],
-      vec![(
-        None,
-        "Search bar filters packages in real-time as you type.",
-      )],
+      vec![(None, "Search bar filters packages in real-time as you type.")],
       vec![(None, "Filter persists when adding/removing packages.")],
     ]);
     let help_modal = HelpModal::new("Package Picker", help_content);
@@ -1908,259 +1430,208 @@ impl PackagePicker {
     Self {
       focused: false,
       package_manager,
-      selected,
-      available,
+      pane: PickerPane::Search,
+      selected_cursor: 0,
+      available_cursor: 0,
+      title_selected: title_selected.to_string(),
+      title_available: title_available.to_string(),
       search_bar,
       help_modal,
-      current_filter: None,
     }
+  }
+
+  /// Replace the package model, keeping the current filter and cursors sane.
+  pub fn set_package_manager(&mut self, mut pm: PackageManager) {
+    pm.set_filter(self.search_bar.value().into());
+    self.package_manager = pm;
+    self.clamp_cursors();
   }
 
   pub fn get_selected_packages(&self) -> Vec<String> {
     self.package_manager.get_selected_packages()
   }
 
-  pub fn get_available_packages(&self) -> Vec<String> {
-    self.package_manager.get_available_packages()
-  }
-
-  fn focus_available(&mut self) {
-    self.available.focus();
-    self.search_bar.unfocus();
-    self.selected.unfocus();
-  }
-
-  fn focus_selected(&mut self) {
-    self.selected.focus();
-    self.search_bar.unfocus();
-    self.available.unfocus();
+  fn set_pane(&mut self, pane: PickerPane) {
+    self.pane = pane;
+    if pane == PickerPane::Search {
+      self.search_bar.focus();
+    } else {
+      self.search_bar.unfocus();
+    }
   }
 
   /// Focus the search bar (used when opening the page)
   pub fn focus_search(&mut self) {
-    self.search_bar.focus();
-    self.available.unfocus();
-    self.selected.unfocus();
+    self.set_pane(PickerPane::Search);
   }
 
-  /// General focus method — defaults to search bar
-  pub fn focus(&mut self) {
-    self.focused = true;
-    self.focus_search();
+  fn clamp_cursors(&mut self) {
+    self.selected_cursor = self.selected_cursor.min(self.package_manager.selected_len().saturating_sub(1));
+    self.available_cursor = self.available_cursor.min(self.package_manager.available().len().saturating_sub(1));
   }
 
-  fn update_available_list(&mut self) {
-    let items = self.package_manager.get_current_available();
-    self.available.set_items(items);
+  fn apply_search_filter(&mut self) {
+    self.package_manager.set_filter(Some(self.search_bar.value()));
+    self.available_cursor = 0;
   }
 
-  pub fn set_filter(&mut self, filter: Option<String>) {
-    self.current_filter = filter.clone();
-    let items = if let Some(filter) = filter {
-      self.package_manager.get_available_filtered(&filter)
-    } else {
-      self.package_manager.get_available_packages()
-    };
-    self.available.set_items(items);
-    self.available.selected_idx = 0; // reset cursor to first match
+  fn render_list(&self, f: &mut Frame, area: Rect, title: &str, idxs: impl Iterator<Item = usize>, cursor: usize, focused: bool) {
+    // Only materialise the rows that can be shown: a 20k-package list would
+    // otherwise allocate 20k ListItems per frame.
+    let visible = area.height.saturating_sub(2) as usize;
+    let skip = cursor.saturating_sub(visible.saturating_sub(1));
+    let items: Vec<ListItem> = idxs
+      .skip(skip)
+      .take(visible)
+      .map(|i| ListItem::new(self.package_manager.name(i)))
+      .collect();
+    let border_color = if focused { Color::Yellow } else { Color::Indexed(242) };
+    let list = List::new(items)
+      .block(
+        Block::default()
+          .title(title)
+          .borders(Borders::ALL)
+          .border_style(Style::default().fg(border_color)),
+      )
+      .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+    let mut state = ListState::default();
+    state.select(Some(cursor - skip));
+    f.render_stateful_widget(list, area, &mut state);
   }
 }
 
 impl ConfigWidget for PackagePicker {
   fn render(&self, f: &mut Frame, area: Rect) {
-    let hor_chunks = split_hor!(
-      area,
-      0,
-      [Constraint::Percentage(50), Constraint::Percentage(50),]
-    );
-    let vert_chunks_left = split_vert!(
-      hor_chunks[0],
-      0,
-      [Constraint::Length(5), Constraint::Min(0),]
-    );
-    let vert_chunks_right = split_vert!(
-      hor_chunks[1],
-      0,
-      [Constraint::Length(5), Constraint::Min(0),]
-    );
+    let hor_chunks = split_hor!(area, 0, [Constraint::Percentage(50), Constraint::Percentage(50)]);
+    let vert_chunks_left = split_vert!(hor_chunks[0], 0, [Constraint::Length(5), Constraint::Min(0)]);
+    let vert_chunks_right = split_vert!(hor_chunks[1], 0, [Constraint::Length(5), Constraint::Min(0)]);
 
-    self.selected.render(f, vert_chunks_left[1]);
+    let n_sel = self.package_manager.selected_len();
+    let n_avail = self.package_manager.available().len();
+    self.render_list(
+      f,
+      vert_chunks_left[1],
+      &format!("{} ({n_sel})", self.title_selected),
+      self.package_manager.selected(),
+      self.selected_cursor,
+      self.pane == PickerPane::Selected,
+    );
     self.search_bar.render(f, vert_chunks_right[0]);
-    self.available.render(f, vert_chunks_right[1]);
+    self.render_list(
+      f,
+      vert_chunks_right[1],
+      &format!("{} ({n_avail})", self.title_available),
+      self.package_manager.available().iter().copied(),
+      self.available_cursor,
+      self.pane == PickerPane::Available,
+    );
     self.help_modal.render(f, area);
   }
 
   fn handle_input(&mut self, event: KeyEvent) -> Signal {
-    use ratatui::crossterm::event::KeyCode;
-
     match event.code {
       KeyCode::Char('?') => {
         self.help_modal.toggle();
-        return Signal::Wait;
-      }
-      KeyCode::Left => {
-        if self.available.is_focused() {
-          // Available -> Selected
-          self.focus_selected();
-        } else if self.search_bar.is_focused() {
-          // Search -> Selected (move left)
-          self.focus_selected();
-        } else if self.selected.is_focused() {
-          // Selected -> Search (wrap left)
-          self.search_bar.focus();
-          self.available.unfocus();
-          self.selected.unfocus();
-        }
-        return Signal::Wait;
-      }
-      KeyCode::Right => {
-        if self.selected.is_focused() {
-          // Selected -> Available
-          self.focus_available();
-        } else if self.available.is_focused() {
-          // Available -> Search (move right)
-          self.search_bar.focus();
-          self.available.unfocus();
-          self.selected.unfocus();
-        } else if self.search_bar.is_focused() {
-          // Search -> Available (wrap right)
-          self.focus_available();
-        }
         return Signal::Wait;
       }
       KeyCode::Esc if self.help_modal.visible => {
         self.help_modal.hide();
         return Signal::Wait;
       }
-      _ if self.help_modal.visible => {
+      _ if self.help_modal.visible => return Signal::Wait,
+      KeyCode::Left => {
+        self.set_pane(match self.pane {
+          PickerPane::Available | PickerPane::Search => PickerPane::Selected,
+          PickerPane::Selected => PickerPane::Search,
+        });
+        return Signal::Wait;
+      }
+      KeyCode::Right => {
+        self.set_pane(match self.pane {
+          PickerPane::Selected | PickerPane::Search => PickerPane::Available,
+          PickerPane::Available => PickerPane::Search,
+        });
+        return Signal::Wait;
+      }
+      KeyCode::Char('/') if self.pane != PickerPane::Search => {
+        self.search_bar.clear();
+        self.apply_search_filter();
+        self.set_pane(PickerPane::Search);
         return Signal::Wait;
       }
       _ => {}
     }
 
-    if event.code == KeyCode::Char('/') && !self.search_bar.is_focused() {
-      self.search_bar.focus();
-      self.search_bar.clear();
-      self.available.unfocus();
-      self.selected.unfocus();
-      return Signal::Wait;
-    }
-    if self.search_bar.is_focused() {
-      match event.code {
-        KeyCode::Enter | KeyCode::Tab => {
-          self.focus_available();
-          Signal::Wait
-        }
-        KeyCode::Down => {
-          self.focus_available();
-          Signal::Wait
-        }
+    match self.pane {
+      PickerPane::Search => match event.code {
+        KeyCode::Enter | KeyCode::Tab | KeyCode::Down => self.set_pane(PickerPane::Available),
         KeyCode::Esc => {
           self.search_bar.clear();
-          self.set_filter(None);
-          self.focus_available();
-          Signal::Wait
+          self.apply_search_filter();
+          self.set_pane(PickerPane::Available);
         }
         _ => {
-          let signal = self.search_bar.handle_input(event);
-          let filter_text = self
-            .search_bar
-            .get_value()
-            .and_then(|v| v.as_str().map(|s| s.to_string()));
-
-          if let Some(filter) = filter_text {
-            if !filter.is_empty() {
-              self.set_filter(Some(filter));
-            } else {
-              self.set_filter(None);
-            }
-          } else {
-            self.set_filter(None);
-          }
-          signal
+          self.search_bar.handle_input(event);
+          self.apply_search_filter();
         }
-      }
-    } else if self.selected.is_focused() {
-      match event.code {
+      },
+      PickerPane::Selected => match event.code {
         crate::ui_down!() => {
-          self.selected.next_item();
-          Signal::Wait
+          if self.selected_cursor + 1 < self.package_manager.selected_len() {
+            self.selected_cursor += 1;
+          }
         }
         crate::ui_up!() => {
-          if !self.selected.previous_item() {
-            self.search_bar.focus();
-            self.selected.unfocus();
+          if self.selected_cursor > 0 {
+            self.selected_cursor -= 1;
+          } else {
+            self.set_pane(PickerPane::Search);
           }
-          Signal::Wait
         }
-        KeyCode::Tab => {
-          self.focus_available();
-          Signal::Wait
-        }
+        KeyCode::Tab => self.set_pane(PickerPane::Available),
         KeyCode::Enter => {
-          let selected_idx = self.selected.selected_idx;
-          if let Some(pkg) = self.selected.selected_item()
-            && self.package_manager.move_to_available(pkg) {
-              self
-                .selected
-                .set_items(self.package_manager.get_selected_packages());
-              self.update_available_list();
-              self.selected.selected_idx = selected_idx.min(self.selected.len().saturating_sub(1));
-            }
-          Signal::Wait
-        }
-        _ => Signal::Wait,
-      }
-    } else if self.available.is_focused() {
-      match event.code {
-        ui_down!() => {
-          self.available.next_item();
-          Signal::Wait
-        }
-        ui_up!() => {
-          if !self.available.previous_item() {
-            self.search_bar.focus();
-            self.available.unfocus();
+          let idx = self.package_manager.selected().nth(self.selected_cursor);
+          if let Some(idx) = idx {
+            self.package_manager.deselect(idx);
+            self.clamp_cursors();
           }
-          Signal::Wait
         }
-        KeyCode::Tab => {
-          self.focus_selected();
-          Signal::Wait
+        _ => {}
+      },
+      PickerPane::Available => match event.code {
+        crate::ui_down!() => {
+          if self.available_cursor + 1 < self.package_manager.available().len() {
+            self.available_cursor += 1;
+          }
         }
+        crate::ui_up!() => {
+          if self.available_cursor > 0 {
+            self.available_cursor -= 1;
+          } else {
+            self.set_pane(PickerPane::Search);
+          }
+        }
+        KeyCode::Tab => self.set_pane(PickerPane::Selected),
         KeyCode::Enter => {
-          let selected_idx = self.available.selected_idx;
-          if let Some(pkg) = self.available.selected_item()
-            && self.package_manager.move_to_selected(pkg) {
-              self
-                .selected
-                .set_items(self.package_manager.get_selected_packages());
-              self.update_available_list();
-              self.available.selected_idx =
-                selected_idx.min(self.available.len().saturating_sub(1));
-            }
-          Signal::Wait
+          if let Some(&idx) = self.package_manager.available().get(self.available_cursor) {
+            self.package_manager.select(idx);
+            self.clamp_cursors();
+          }
         }
-        _ => Signal::Wait,
-      }
-    } else {
-      self.focus_available();
-      Signal::Wait
+        _ => {}
+      },
     }
+    Signal::Wait
   }
 
   fn focus(&mut self) {
     self.focused = true;
-    self.search_bar.focus();
-    self.available.unfocus();
-    self.selected.unfocus();
+    self.set_pane(PickerPane::Search);
   }
 
   fn unfocus(&mut self) {
     self.focused = false;
     self.search_bar.unfocus();
-    self.available.unfocus();
-    self.selected.unfocus();
   }
 
   fn is_focused(&self) -> bool {
@@ -2168,64 +1639,7 @@ impl ConfigWidget for PackagePicker {
   }
 
   fn get_value(&self) -> Option<Value> {
-    Some(Value::Array(
-      self
-        .get_selected_packages()
-        .into_iter()
-        .map(Value::String)
-        .collect(),
-    ))
-  }
-}
-
-pub struct ProgressBar {
-  message: String,
-  progress: u32, // 0-100
-}
-
-impl ProgressBar {
-  pub fn new(message: impl Into<String>, progress: u32) -> Self {
-    Self {
-      message: message.into(),
-      progress,
-    }
-  }
-  pub fn set_progress(&mut self, progress: u32) {
-    self.progress = progress.clamp(0, 100);
-  }
-  pub fn set_message(&mut self, message: impl Into<String>) {
-    self.message = message.into();
-  }
-}
-
-impl ConfigWidget for ProgressBar {
-  fn handle_input(&mut self, _key: KeyEvent) -> Signal {
-    Signal::Wait
-  }
-  fn render(&self, f: &mut Frame, area: Rect) {
-    let gauge = Gauge::default()
-      .block(
-        Block::default()
-          .title(self.message.clone())
-          .borders(Borders::ALL),
-      )
-      .gauge_style(
-        Style::default()
-          .fg(Color::Green)
-          .bg(Color::Black)
-          .add_modifier(Modifier::BOLD),
-      )
-      .percent(self.progress as u16);
-    f.render_widget(gauge, area);
-  }
-  fn focus(&mut self) {
-    // ProgressBar does not need focus
-  }
-  fn unfocus(&mut self) {
-    // ProgressBar does not need focus
-  }
-  fn is_focused(&self) -> bool {
-    false
+    Some(Value::Array(self.get_selected_packages().into_iter().map(Value::String).collect()))
   }
 }
 
@@ -2237,18 +1651,17 @@ impl ConfigWidget for ProgressBar {
 /// - Circular buffer to prevent memory growth
 /// - Handles log rotation and file truncation
 /// - Efficient incremental reading
-// Add/ensure these imports exist at the top of the file:
 pub struct LogBox<'a> {
   title: String,
   focused: bool,
   pub line_buf: VecDeque<Line<'a>>, // circular buffer
   max_buf_size: usize,              // max lines to keep
-  log_file: Option<File>,           // (kept for API compatibility; not used)
-  reader: Option<BufReader<File>>,  // file reader we tail from
+  reader: Option<File>,             // file we tail from
+  inode: u64,                       // inode of `reader`, to notice replacement
   file_pos: u64,                    // current read offset
   log_path: Option<PathBuf>,        // path to the log file
-  pending_bytes: Vec<u8>,   // bytes that didn't decode to valid UTF-8 yet
-  pending_line: String,     // decoded but not yet newline-terminated text
+  pending_bytes: Vec<u8>,           // bytes that didn't decode to valid UTF-8 yet
+  pending_line: String,             // decoded but not yet newline-terminated text
 }
 
 impl<'a> LogBox<'a> {
@@ -2258,8 +1671,8 @@ impl<'a> LogBox<'a> {
       focused: false,
       line_buf: VecDeque::with_capacity(512),
       max_buf_size: 1000,
-      log_file: None,
       reader: None,
+      inode: 0,
       file_pos: 0,
       log_path: None,
       pending_bytes: Vec::new(),
@@ -2267,25 +1680,41 @@ impl<'a> LogBox<'a> {
     }
   }
 
+  /// Start tailing `path` from its current end. The file is opened read-only
+  /// and kept open; `poll_log` reads whatever was appended since last time.
   pub fn open_log<P: Into<PathBuf>>(&mut self, path: P) -> anyhow::Result<()> {
     let path = path.into();
-
-    // Open read-only for tailing; don't truncate here.
-    // (You can truncate earlier in your setup if desired.)
-    let file = OpenOptions::new()
-      .read(true)
-      .write(true)
-      .create(true)
-      .truncate(false)
-      .open(&path)?;
-
-    let file_pos = file.metadata()?.len(); // start reading at EOF
-    let reader = BufReader::new(file.try_clone()?);
-    self.log_file = Some(file);
-    self.reader = Some(reader);
-    self.file_pos = file_pos;
+    let file = OpenOptions::new().read(true).open(&path)?;
+    let meta = file.metadata()?;
+    self.file_pos = meta.len(); // start reading at EOF
+    self.inode = meta.ino();
+    self.reader = Some(file);
     self.log_path = Some(path);
     Ok(())
+  }
+
+  /// The installer backend recreates the log file when it starts (new inode).
+  /// Reopen from the beginning when that happens so no output is missed.
+  fn reopen_if_replaced(&mut self) {
+    let Some(path) = &self.log_path else { return };
+    let Ok(meta) = std::fs::metadata(path) else { return };
+    if meta.ino() == self.inode {
+      return;
+    }
+    if let Ok(file) = OpenOptions::new().read(true).open(path) {
+      self.reader = Some(file);
+      self.inode = meta.ino();
+      self.file_pos = 0;
+      self.pending_bytes.clear();
+      self.pending_line.clear();
+    }
+  }
+
+  fn push_line(&mut self, line: Line<'a>) {
+    self.line_buf.push_back(line);
+    if self.line_buf.len() > self.max_buf_size {
+      self.line_buf.pop_front();
+    }
   }
 
   /// Call this every render tick to read any new bytes appended to the file.
@@ -2293,91 +1722,55 @@ impl<'a> LogBox<'a> {
   /// - Preserves ANSI colors by feeding raw text to `IntoText`.
   /// - Detects truncation/rotation and resets cleanly.
   pub fn poll_log(&mut self) -> anyhow::Result<()> {
-    let Some(path) = &self.log_path else { return Ok(()); };
-    if !path.exists() { return Ok(()); }
+    self.reopen_if_replaced();
+    let Some(f) = self.reader.as_mut() else { return Ok(()) };
 
-    // detect truncation/rotation
-    let current_size = std::fs::metadata(path)?.len();
+    let current_size = f.metadata()?.len();
     if current_size < self.file_pos {
+      // truncated/rotated: start over
       self.file_pos = 0;
       self.pending_bytes.clear();
-      // keep pending_line; if the file was truncated we’ll rebuild naturally
     }
-    if current_size <= self.file_pos { return Ok(()); }
+    if current_size <= self.file_pos {
+      return Ok(());
+    }
 
-    // read new bytes
-    let mut f = File::open(path)?;
     f.seek(SeekFrom::Start(self.file_pos))?;
-    let mut new_bytes = Vec::new();
-    f.read_to_end(&mut new_bytes)?;
-    if new_bytes.is_empty() { return Ok(()); }
+    let mut buf = std::mem::take(&mut self.pending_bytes);
+    f.take(current_size - self.file_pos).read_to_end(&mut buf)?;
     self.file_pos = current_size;
 
-    // prepend undecoded tail from last time
-    let mut buf = Vec::with_capacity(self.pending_bytes.len() + new_bytes.len());
-    buf.extend_from_slice(&self.pending_bytes);
-    buf.extend_from_slice(&new_bytes);
-    self.pending_bytes.clear();
-
-    // decode only valid UTF-8 prefix; keep remainder for next tick
+    // decode only the valid UTF-8 prefix; keep the remainder for next tick
     let valid_len = match std::str::from_utf8(&buf) {
       Ok(_) => buf.len(),
       Err(e) => e.valid_up_to(),
     };
     let decoded = String::from_utf8_lossy(&buf[..valid_len]).into_owned();
-    if valid_len < buf.len() {
-      self.pending_bytes.extend_from_slice(&buf[valid_len..]);
-    }
+    self.pending_bytes.extend_from_slice(&buf[valid_len..]);
 
-    // Stream-normalize: handle '\r' (overwrite), finalize on '\n', skip blanks
+    // Stream-normalise: handle '\r' (overwrite), finalise on '\n', skip blanks
     for ch in decoded.chars() {
       match ch {
-        '\r' => {
-          // terminal-style redraw: toss the current work-in-progress line
-          self.pending_line.clear();
-        }
+        '\r' => self.pending_line.clear(),
         '\n' => {
-          // finalize a line; strip ANSI, discard blanks
           let raw = std::mem::take(&mut self.pending_line);
           let stripped = strip_ansi_escapes::strip_str(&raw);
-          if !stripped.trim().is_empty() {
-            if let Ok(text) = stripped.into_text() {
-              for line in text.lines {
-                self.line_buf.push_back(line);
-                if self.line_buf.len() > self.max_buf_size { self.line_buf.pop_front(); }
-              }
-            } else {
-              self.line_buf.push_back(raw.into());
-              if self.line_buf.len() > self.max_buf_size { self.line_buf.pop_front(); }
-            }
+          if stripped.trim().is_empty() {
+            continue;
           }
-          // else: skip truly blank lines
+          match stripped.into_text() {
+            Ok(text) => {
+              for line in text.lines {
+                self.push_line(line);
+              }
+            }
+            Err(_) => self.push_line(raw.into()),
+          }
         }
-        _ => {
-          // build the current line
-          self.pending_line.push(ch);
-        }
+        _ => self.pending_line.push(ch),
       }
     }
-
     Ok(())
-  }
-
-  /// Optional: push lines directly into the UI buffer (not the file).
-  pub fn write_log(&mut self, log_output: &str) {
-    if let Ok(text) = log_output.into_text() {
-      for line in text.lines {
-        self.line_buf.push_back(line);
-        if self.line_buf.len() > self.max_buf_size {
-          self.line_buf.pop_front();
-        }
-      }
-    } else {
-      self.line_buf.push_back(log_output.to_string().into());
-      if self.line_buf.len() > self.max_buf_size {
-        self.line_buf.pop_front();
-      }
-    }
   }
 }
 
@@ -2412,7 +1805,7 @@ enum Phase {
 }
 
 pub struct FancyTicker {
-    messages: Vec<String>,
+    messages: &'static [&'static str],
     // current: usize, // Used for sequential rotation of messages
 
     target: String,
@@ -2428,10 +1821,10 @@ pub struct FancyTicker {
 }
 
 impl FancyTicker {
-    pub fn new(messages: Vec<&str>) -> Self {
-        let first = messages.first().unwrap_or(&"").to_string();
+    pub fn new(messages: &'static [&'static str]) -> Self {
+        let first = messages.first().copied().unwrap_or("").to_string();
         Self {
-            messages: messages.into_iter().map(|s| s.to_string()).collect(),
+            messages,
             //current: 0, // Used for sequential rotation of messages
             target: first,
             buf: String::new(),
@@ -2444,13 +1837,6 @@ impl FancyTicker {
             swapcase_chance: 0.10,
             hue: 0,
         }
-    }
-
-    pub fn set_phrase<S: Into<String>>(&mut self, s: S) {
-        self.target = s.into();
-        self.buf.clear();
-        self.phase = Phase::Typing;
-        self.last_step = Instant::now();
     }
 
     /// Advance the animation.
@@ -2489,7 +1875,9 @@ impl FancyTicker {
                         //self.target = self.messages[self.current].clone();
                         // random rotation of messages
                         let mut rng = rand::rng();
-                        self.target = self.messages.choose(&mut rng).unwrap().clone();
+                        if let Some(m) = self.messages.choose(&mut rng) {
+                            self.target = (*m).to_string();
+                        }
                         
                         self.phase = Phase::Typing;
                     }
@@ -2571,4 +1959,82 @@ fn leet_map(c: char) -> Option<char> {
         'g' | 'G' => '9',
         _ => return None,
     })
+}
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use ratatui::crossterm::event::KeyModifiers;
+  use std::io::Write;
+
+  fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+  }
+
+  #[test]
+  fn line_editor_handles_multibyte_input() {
+    let mut e = LineEditor::new("t", None::<&str>);
+    for c in "héllo wörld".chars() {
+      e.handle_input(key(KeyCode::Char(c)));
+    }
+    assert_eq!(e.value(), "héllo wörld");
+    e.handle_input(key(KeyCode::Home));
+    e.handle_input(key(KeyCode::Right));
+    e.handle_input(key(KeyCode::Delete)); // delete 'é'
+    assert_eq!(e.value(), "hllo wörld");
+    e.handle_input(key(KeyCode::End));
+    e.handle_input(key(KeyCode::Backspace));
+    assert_eq!(e.value(), "hllo wörl");
+    e.handle_input(key(KeyCode::Char('ß')));
+    assert_eq!(e.value(), "hllo wörlß");
+  }
+
+  #[test]
+  fn str_list_filter_tracks_selection() {
+    let mut l = StrList::new("t", vec!["Europe/Rome".into(), "Asia/Tokyo".into(), "Europe/Berlin".into()]);
+    l.set_filter(Some("eur"));
+    assert_eq!(l.filtered.len(), 2);
+    assert!(l.selected_item().unwrap().starts_with("Europe"));
+    l.next_item();
+    l.handle_input(key(KeyCode::Enter));
+    assert_eq!(l.committed.as_deref(), l.selected_item().map(String::as_str));
+    l.set_filter(None::<String>);
+    assert_eq!(l.filtered.len(), 3);
+  }
+
+  #[test]
+  fn log_box_tails_and_survives_file_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dory.log");
+    std::fs::write(&path, "old\n").unwrap();
+    let mut lb = LogBox::new("t".into());
+    lb.open_log(&path).unwrap();
+    lb.poll_log().unwrap();
+    assert!(lb.line_buf.is_empty(), "starts at EOF");
+
+    std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"one\ntwo\npartial").unwrap();
+    lb.poll_log().unwrap();
+    assert_eq!(lb.line_buf.len(), 2);
+
+    // The backend removes and recreates the file: a new inode.
+    std::fs::remove_file(&path).unwrap();
+    std::fs::write(&path, "fresh\n").unwrap();
+    lb.poll_log().unwrap();
+    assert_eq!(lb.line_buf.len(), 3);
+    assert_eq!(lb.line_buf.back().unwrap().spans[0].content, "fresh");
+  }
+
+  #[test]
+  fn package_manager_select_deselect() {
+    let mut pm = PackageManager::new(vec!["vim".into(), "nano".into(), "git".into()], &["git".into()]);
+    assert_eq!(pm.get_selected_packages(), vec!["git"]);
+    assert_eq!(pm.available().len(), 2);
+    pm.set_filter(Some("vi".into()));
+    assert_eq!(pm.available().len(), 1);
+    let idx = pm.available()[0];
+    pm.select(idx);
+    assert_eq!(pm.get_selected_packages(), vec!["git", "vim"]);
+    assert!(pm.available().is_empty());
+    pm.deselect(idx);
+    assert_eq!(pm.available().len(), 1);
+  }
 }

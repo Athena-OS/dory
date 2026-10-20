@@ -8,7 +8,7 @@ pub const COMMON: &[&str] = &[
     "pocl", "asciinema", "bat", "bc", "cmatrix", "cowsay", "fastfetch", "file-roller",
     "fortune-mod", "git", "gparted", "gvfs-gphoto2", "gvfs-mtp", "hexedit", "jq", "keepassxc",
     "lolcat", "lsd", "nano-syntax-highlighting", "nautilus", "ncdu", "onionshare", "openvpn",
-    "orca", "p7zip", "podman", "polkit", "scx-scheds", "scx-tools", "sl", "torbrowser-launcher",
+    "orca", "p7zip", "podman", "polkit", "sl", "torbrowser-launcher",
     "tree", "unzip", "usbguard", "vim", "vnstat", "which", "xclip", "xmlstarlet", "zoxide",
     "athena-bash", "athena-kitty-config", "athena-nexus", "athena-settings",
     "athena-tmux-config", "athena-tweak-tool", "athena-uki", "athena-vscodium-themes", "athena-welcome",
@@ -16,19 +16,18 @@ pub const COMMON: &[&str] = &[
 ];
 
 pub const ARCH_ONLY: &[&str] = &[
-    "systemd-sysvcompat","networkmanager","arch-install-scripts","edk2-shell",
-    "inetutils", "iptables-nft", "mesa","mesa-utils","mkinitcpio-nfs-utils","mkinitcpio-openswap",
-    "netctl","profile-sync-daemon","sof-firmware","wireless_tools",
-    "pipewire-pulse","pipewire-jack","ananicy","bashtop","imagemagick","lib32-glibc","mtpfs",
-    "networkmanager-openvpn","noto-fonts-cjk", "octopi","openbsd-netcat","paru","reflector",
-    "toilet-fonts","wget","athena-firefox-config","athena-powershell-config",
-    "athena-vim-config","kando-bin"
+    "systemd-sysvcompat", "networkmanager", "arch-install-scripts", "edk2-shell",
+    "inetutils", "iptables-nft", "mesa", "mesa-utils", "mkinitcpio-nfs-utils", "mkinitcpio-openswap",
+    "netctl", "profile-sync-daemon", "sof-firmware", "wireless_tools",
+    "pipewire-pulse", "pipewire-jack", "ananicy", "bashtop", "imagemagick", "lib32-glibc", "mtpfs",
+    "networkmanager-openvpn", "noto-fonts-cjk", "octopi", "openbsd-netcat", "paru", "reflector",
+    "toilet-fonts", "wget", "athena-firefox-config", "athena-powershell-config",
+    "athena-vim-config", "kando-bin",
 ];
 
-// Small helpers
+/// Packages needed on UEFI systems for systemd-boot + shim + UKI.
+pub const UEFI: &[&str] = &["efibootmgr", "mokutil", "sbsigntools", "shim-signed", "systemd-ukify"];
+
 pub fn to_strings(slice: &[&str]) -> Vec<String> {
     slice.iter().map(|s| (*s).to_string()).collect()
-}
-pub fn extend(dst: &mut Vec<String>, slice: &[&str]) {
-    dst.extend(slice.iter().copied().map(String::from));
 }

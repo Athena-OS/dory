@@ -5,30 +5,27 @@ use shared::returncode_eval::files_eval;
 
 pub fn set_hostname(hostname: &str) {
     info!("Setting hostname to {hostname}");
+    let sanitized_hostname = hostname.replace(' ', "");
     if !is_nix() {
-        files::create_file("/mnt/etc/hostname");
         files_eval(
-            files::append_file("/mnt/etc/hostname", hostname),
+            files::write_file("/mnt/etc/hostname", &format!("{sanitized_hostname}\n")),
             "set hostname",
         );
     } else {
-        let sanitized_hostname = hostname.replace(' ', "");
-        
         files_eval(
             files::sed_file(
                 "/mnt/etc/nixos/configuration.nix",
                 "  hostname =.*",
-                &(format!("  hostname = \"{sanitized_hostname}\";")),
+                &format!("  hostname = \"{sanitized_hostname}\";"),
             ),
             "Set Hostname",
-        );        
+        );
     }
 }
 
 pub fn create_hosts() {
-    files::create_file("/mnt/etc/hosts");
     files_eval(
-        files::append_file("/mnt/etc/hosts", "127.0.0.1     localhost"),
+        files::write_file("/mnt/etc/hosts", "127.0.0.1     localhost\n"),
         "create /etc/hosts",
     );
 }

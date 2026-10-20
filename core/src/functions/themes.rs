@@ -1,305 +1,69 @@
 use log::debug;
-use shared::args::{is_nix, ThemeSetup};
+use shared::args::{ThemeSetup, is_nix};
 use shared::files;
 use shared::returncode_eval::files_eval;
 
+struct Theme {
+    /// Arch package.
+    package: &'static str,
+    /// Value of `theme = "…";` in the Athena Nix configuration.
+    nix_name: &'static str,
+    /// VSCodium workbench color theme.
+    vscodium: &'static str,
+    /// tmux power theme.
+    tmux: &'static str,
+}
+
+fn theme(setup: ThemeSetup) -> Option<Theme> {
+    use ThemeSetup::{Cyborg, Frost, Graphite, HackTheBox, RedMoon, Samurai, Sweet, Temple};
+    Some(match setup {
+        Cyborg => Theme { package: "athena-cyborg-design", nix_name: "cyborg", vscodium: "Gruvbox Material Dark", tmux: "gold" },
+        Frost => Theme { package: "athena-frost-design", nix_name: "frost", vscodium: "Tokyo Night Storm", tmux: "sky" },
+        Graphite => Theme { package: "athena-graphite-design", nix_name: "graphite", vscodium: "Just Black", tmux: "snow" },
+        HackTheBox => Theme { package: "athena-htb-design", nix_name: "hackthebox", vscodium: "Hack The Box", tmux: "forest" },
+        RedMoon => Theme { package: "athena-redmoon-design", nix_name: "redmoon", vscodium: "red-blood", tmux: "redwine" },
+        Samurai => Theme { package: "athena-samurai-design", nix_name: "samurai", vscodium: "Tokyo Night Storm", tmux: "sky" },
+        Sweet => Theme { package: "athena-sweetdark-design", nix_name: "sweet", vscodium: "Radical", tmux: "violet" },
+        Temple => Theme { package: "athena-temple-design", nix_name: "temple", vscodium: "Tokyo Night Storm", tmux: "sky" },
+        ThemeSetup::None => return None,
+    })
+}
+
 pub fn install_theme_setup(theme_setup: ThemeSetup) -> Vec<&'static str> {
     debug!("Selecting {theme_setup:?}");
-
-    match theme_setup {
-        ThemeSetup::Cyborg => install_cyborg(),
-        ThemeSetup::Frost => install_frost(),
-        ThemeSetup::Graphite => install_graphite(),
-        ThemeSetup::HackTheBox => install_hackthebox(),
-        ThemeSetup::RedMoon => install_redmoon(),
-        ThemeSetup::Samurai => install_samurai(),
-        ThemeSetup::Sweet => install_sweet(),
-        ThemeSetup::Temple => install_temple(),
-        ThemeSetup::None => {
-            debug!("No theme setup selected");
-            Vec::new() // Return empty vector if no design setup is selected
-        }
-    }
-}
-
-fn install_frost() -> Vec<&'static str> {
+    let Some(t) = theme(theme_setup) else {
+        debug!("No theme setup selected");
+        return Vec::new();
+    };
     if is_nix() {
         files_eval(
-            files::sed_file(
-                "/mnt/etc/nixos/configuration.nix",
-                "  theme =.*",
-                "  theme = \"frost\";",
-            ),
-            "Set Frost design",
-        );        
+            files::sed_file("/mnt/etc/nixos/configuration.nix", "  theme =.*", &format!("  theme = \"{}\";", t.nix_name)),
+            &format!("Set {} design", t.nix_name),
+        );
     }
-    vec![
-        "athena-frost-design",
-    ]
+    vec![t.package]
 }
 
-fn install_cyborg() -> Vec<&'static str> {
-    if is_nix() {
-        files_eval(
-            files::sed_file(
-                "/mnt/etc/nixos/configuration.nix",
-                "  theme =.*",
-                "  theme = \"cyborg\";",
-            ),
-            "Set Cyborg design",
-        );        
-    }
-    vec![
-        "athena-cyborg-design",
-    ]
-}
-
-fn install_graphite() -> Vec<&'static str> {
-    if is_nix() {
-        files_eval(
-            files::sed_file(
-                "/mnt/etc/nixos/configuration.nix",
-                "  theme =.*",
-                "  theme = \"graphite\";",
-            ),
-            "Set Graphite design",
-        );        
-    }
-    vec![
-        "athena-graphite-design",
-    ]
-}
-
-fn install_hackthebox() -> Vec<&'static str> {
-    if is_nix() {
-        files_eval(
-            files::sed_file(
-                "/mnt/etc/nixos/configuration.nix",
-                "  theme =.*",
-                "  theme = \"hackthebox\";",
-            ),
-            "Set Hack The Box design",
-        );        
-    }
-    vec![
-        "athena-htb-design",
-    ]
-}
-
-fn install_redmoon() -> Vec<&'static str> {
-    if is_nix() {
-        files_eval(
-            files::sed_file(
-                "/mnt/etc/nixos/configuration.nix",
-                "  theme =.*",
-                "  theme = \"redmoon\";",
-            ),
-            "Set Red Moon design",
-        );        
-    }
-    vec![
-        "athena-redmoon-design",
-    ]
-}
-
-fn install_samurai() -> Vec<&'static str> {
-    if is_nix() {
-        files_eval(
-            files::sed_file(
-                "/mnt/etc/nixos/configuration.nix",
-                "  theme =.*",
-                "  theme = \"samurai\";",
-            ),
-            "Set Samurai design",
-        );        
-    }
-    vec![
-        "athena-samurai-design",
-    ]
-}
-
-fn install_sweet() -> Vec<&'static str> {
-    if is_nix() {
-        files_eval(
-            files::sed_file(
-                "/mnt/etc/nixos/configuration.nix",
-                "  theme =.*",
-                "  theme = \"sweet\";",
-            ),
-            "Set Sweet design",
-        );        
-    }
-    vec![
-        "athena-sweetdark-design",
-    ]
-}
-
-fn install_temple() -> Vec<&'static str> {
-    if is_nix() {
-        files_eval(
-            files::sed_file(
-                "/mnt/etc/nixos/configuration.nix",
-                "  theme =.*",
-                "  theme = \"temple\";",
-            ),
-            "Set Temple design",
-        );        
-    }
-    vec![
-        "athena-temple-design",
-    ]
-}
-
-/**********************************/
-
-pub fn configure_cyborg() {
+/// Apply the design to the skeleton configs of the target system (Arch only).
+pub fn configure(theme_setup: ThemeSetup) {
+    let Some(t) = theme(theme_setup) else {
+        log::info!("No design configuration needed.");
+        return;
+    };
     files_eval(
         files::sed_file(
             "/mnt/etc/skel/.config/VSCodium/User/settings.json",
             "\"workbench.colorTheme\":.*",
-            "\"workbench.colorTheme\": \"Gruvbox Material Dark\",",
+            &format!("\"workbench.colorTheme\": \"{}\",", t.vscodium),
         ),
-        "Apply Gruvbox Material Dark VSCodium theme",
+        &format!("Apply {} VSCodium theme", t.vscodium),
     );
     files_eval(
         files::sed_file(
             "/mnt/etc/skel/.tmux.conf",
             "set -g @tmux_power_theme.*",
-            "set -g @tmux_power_theme 'gold'",
+            &format!("set -g @tmux_power_theme '{}'", t.tmux),
         ),
-        "Apply Gold Tmux theme",
-    );
-}
-
-pub fn configure_frost() {
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.config/VSCodium/User/settings.json",
-            "\"workbench.colorTheme\":.*",
-            "\"workbench.colorTheme\": \"Tokyo Night Storm\",",
-        ),
-        "Apply Tokyo Night Storm VSCodium theme",
-    );
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.tmux.conf",
-            "set -g @tmux_power_theme.*",
-            "set -g @tmux_power_theme 'sky'",
-        ),
-        "Apply Sky Tmux theme",
-    );
-}
-
-pub fn configure_graphite() {
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.config/VSCodium/User/settings.json",
-            "\"workbench.colorTheme\":.*",
-            "\"workbench.colorTheme\": \"Just Black\",",
-        ),
-        "Apply Just Black VSCodium theme",
-    );
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.tmux.conf",
-            "set -g @tmux_power_theme.*",
-            "set -g @tmux_power_theme 'snow'",
-        ),
-        "Apply Snow Tmux theme",
-    );
-}
-
-pub fn configure_hackthebox() {
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.config/VSCodium/User/settings.json",
-            "\"workbench.colorTheme\":.*",
-            "\"workbench.colorTheme\": \"Hack The Box\",",
-        ),
-        "Apply Hack The Box VSCodium theme",
-    );
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.tmux.conf",
-            "set -g @tmux_power_theme.*",
-            "set -g @tmux_power_theme 'forest'",
-        ),
-        "Apply Forest Tmux theme",
-    );
-}
-
-pub fn configure_redmoon() {
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.config/VSCodium/User/settings.json",
-            "\"workbench.colorTheme\":.*",
-            "\"workbench.colorTheme\": \"red-blood\",",
-        ),
-        "Apply Red Blood VSCodium theme",
-    );
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.tmux.conf",
-            "set -g @tmux_power_theme.*",
-            "set -g @tmux_power_theme 'redwine'",
-        ),
-        "Apply Redwine Tmux theme",
-    );
-}
-
-pub fn configure_samurai() {
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.config/VSCodium/User/settings.json",
-            "\"workbench.colorTheme\":.*",
-            "\"workbench.colorTheme\": \"Tokyo Night Storm\",",
-        ),
-        "Apply Tokyo Night Storm VSCodium theme",
-    );
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.tmux.conf",
-            "set -g @tmux_power_theme.*",
-            "set -g @tmux_power_theme 'sky'",
-        ),
-        "Apply Sky Tmux theme",
-    );
-}
-
-pub fn configure_sweet() {
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.config/VSCodium/User/settings.json",
-            "\"workbench.colorTheme\":.*",
-            "\"workbench.colorTheme\": \"Radical\",",
-        ),
-        "Apply Radical VSCodium theme",
-    );
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.tmux.conf",
-            "set -g @tmux_power_theme.*",
-            "set -g @tmux_power_theme 'violet'",
-        ),
-        "Apply Violet Tmux theme",
-    );
-}
-
-pub fn configure_temple() {
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.config/VSCodium/User/settings.json",
-            "\"workbench.colorTheme\":.*",
-            "\"workbench.colorTheme\": \"Tokyo Night Storm\",",
-        ),
-        "Apply Tokyo Night Storm VSCodium theme",
-    );
-    files_eval(
-        files::sed_file(
-            "/mnt/etc/skel/.tmux.conf",
-            "set -g @tmux_power_theme.*",
-            "set -g @tmux_power_theme 'sky'",
-        ),
-        "Apply Sky Tmux theme",
+        &format!("Apply {} Tmux theme", t.tmux),
     );
 }
