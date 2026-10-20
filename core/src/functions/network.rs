@@ -31,12 +31,12 @@ pub fn set_hostname(hostname: &str) {
 /// lock at startup for one, otherwise waits for several 5 s DNS timeouts.
 pub fn hosts_file(hostname: &str) -> String {
   let host = hostname.replace(' ', "");
-  format!(
-    "127.0.0.1   localhost
-     ::1         localhost
-     127.0.1.1   {host}.localdomain {host}
-"
-  )
+  let lines = [
+    "127.0.0.1   localhost".to_string(),
+    "::1         localhost".to_string(),
+    format!("127.0.1.1   {host}.localdomain {host}"),
+  ];
+  lines.join("\n") + "\n"
 }
 
 pub fn create_hosts(hostname: &str) {
@@ -51,7 +51,13 @@ mod tests {
   #[test]
   fn hosts_file_maps_the_hostname() {
     let h = super::hosts_file("athenaos");
-    assert!(h.contains("127.0.0.1   localhost"));
-    assert!(h.contains("127.0.1.1   athenaos.localdomain athenaos"));
+    assert_eq!(
+      h,
+      "127.0.0.1   localhost\n::1         localhost\n127.0.1.1   athenaos.localdomain athenaos\n"
+    );
+    assert!(
+      h.lines().all(|l| !l.starts_with(' ')),
+      "no indented lines: {h:?}"
+    );
   }
 }
