@@ -10,7 +10,6 @@ use std::{
 };
 use throbber_widgets_tui::{BOX_DRAWING, ThrobberState};
 
-use ansi_to_tui::IntoText;
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use ratatui::{
   Frame,
@@ -1876,20 +1875,43 @@ impl<'a> LogBox<'a> {
           if stripped.trim().is_empty() {
             continue;
           }
-          match stripped.into_text() {
-            Ok(text) => {
-              for line in text.lines {
-                self.push_line(line);
-              }
-            }
-            Err(_) => self.push_line(raw.into()),
-          }
+          let line = strip_log_prefix(&stripped);
+          self.push_line(line);
         }
         _ => self.pending_line.push(ch),
       }
     }
     Ok(())
   }
+}
+
+/// Turn a log-file line into a display line for the Logs pane.
+///
+/// The logger writes `[ LEVEL ] HH:MM:SS message`; the file keeps that, but
+/// on screen only the message is shown so it reads like the pacman output
+/// around it. The level survives as colour: errors red, warnings yellow,
+/// debug/trace dim.
+fn strip_log_prefix(line: &str) -> Line<'static> {
+  // "[ INFO ] 12:34:56 msg" -> level = "INFO", rest = "msg"
+  let parsed = line.strip_prefix("[ ").and_then(|r| {
+    let (level, rest) = r.split_once(" ] ")?;
+    // 8-char timestamp followed by a space
+    let msg = rest
+      .get(9..)
+      .filter(|_| rest.as_bytes().get(8) == Some(&b' '))?;
+    Some((level.trim(), msg))
+  });
+  let (style, text) = match parsed {
+    Some(("ERROR", msg)) => (
+      Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+      msg,
+    ),
+    Some(("WARN", msg)) => (Style::default().fg(Color::Yellow), msg),
+    Some(("DEBUG" | "TRACE", msg)) => (Style::default().fg(Color::Indexed(242)), msg),
+    Some((_, msg)) => (Style::default(), msg),
+    None => (Style::default(), line),
+  };
+  Line::from(Span::styled(text.to_string(), style))
 }
 
 impl<'a> ConfigWidget for LogBox<'a> {
@@ -2173,6 +2195,26 @@ mod tests {
     lb.poll_log().unwrap();
     assert_eq!(lb.line_buf.len(), 3);
     assert_eq!(lb.line_buf.back().unwrap().spans[0].content, "fresh");
+  }
+
+  #[test]
+  fn log_prefix_is_stripped_but_level_colours_lines() {
+    let l = strip_log_prefix("[ INFO ] 23:45:49 Set password for root");
+    assert_eq!(l.spans[0].content, "Set password for root");
+    assert_eq!(l.spans[0].style, Style::default());
+    let e = strip_log_prefix("[ ERROR ] 23:45:50 Schedule enrollment  ERROR: failed");
+    assert_eq!(e.spans[0].content, "Schedule enrollment  ERROR: failed");
+    assert_eq!(e.spans[0].style.fg, Some(Color::Red));
+    // lines not written by the logger (pacman output, step footer) are untouched
+    let p = strip_log_prefix(" athena   120.0 KiB  1.2 MiB/s 00:00 [###] 100%");
+    assert_eq!(
+      p.spans[0].content,
+      " athena   120.0 KiB  1.2 MiB/s 00:00 [###] 100%"
+    );
+    assert_eq!(
+      strip_log_prefix("[ not a log line").spans[0].content,
+      "[ not a log line"
+    );
   }
 
   #[test]
