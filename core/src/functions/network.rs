@@ -23,9 +23,35 @@ pub fn set_hostname(hostname: &str) {
   }
 }
 
-pub fn create_hosts() {
+/// Contents of /etc/hosts for the target system.
+///
+/// The machine's own name must resolve without asking a DNS server: with a
+/// resolver that drops queries for `<host>.localdomain` (VMware NAT, some
+/// routers), anything that looks up the local hostname, Firefox's profile
+/// lock at startup for one, otherwise waits for several 5 s DNS timeouts.
+pub fn hosts_file(hostname: &str) -> String {
+  let host = hostname.replace(' ', "");
+  format!(
+    "127.0.0.1   localhost
+     ::1         localhost
+     127.0.1.1   {host}.localdomain {host}
+"
+  )
+}
+
+pub fn create_hosts(hostname: &str) {
   files_eval(
-    files::write_file("/mnt/etc/hosts", "127.0.0.1     localhost\n"),
+    files::write_file("/mnt/etc/hosts", &hosts_file(hostname)),
     "create /etc/hosts",
   );
+}
+
+#[cfg(test)]
+mod tests {
+  #[test]
+  fn hosts_file_maps_the_hostname() {
+    let h = super::hosts_file("athenaos");
+    assert!(h.contains("127.0.0.1   localhost"));
+    assert!(h.contains("127.0.1.1   athenaos.localdomain athenaos"));
+  }
 }

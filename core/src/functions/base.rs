@@ -139,7 +139,11 @@ pub fn install_packages(mut packages: Vec<String>) -> i32 {
     files::sed_file(
       "/mnt/etc/nsswitch.conf",
       "hosts:.*",
-      "hosts: mymachines resolve [!UNAVAIL=return] files dns mdns wins myhostname",
+      // `myhostname` before `dns`: the machine's own name never goes to a DNS
+      // server (which can take 5 s per timeout when the upstream drops
+      // `<host>.localdomain`). `mdns_minimal` only answers `.local` names and
+      // is skipped by glibc when nss-mdns is not installed.
+      "hosts: mymachines resolve [!UNAVAIL=return] files myhostname mdns_minimal [NOTFOUND=return] dns wins",
     ),
     "Set nsswitch configuration",
   );

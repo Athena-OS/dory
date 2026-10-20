@@ -244,7 +244,7 @@ pub fn install_config(inputs: &[ConfigInput], log_path: &str) -> i32 {
   network::set_hostname(&config.hostname);
 
   if !is_nix() {
-    network::create_hosts();
+    network::create_hosts(&config.hostname);
     info!("Configuring desktop : {:?}", config.desktop);
     if let Some(desktop) = desktop {
       desktops::configure(desktop);
