@@ -1,4 +1,4 @@
-use rand::{prelude::IndexedRandom, RngExt};
+use rand::{RngExt, prelude::IndexedRandom};
 use std::{
   collections::VecDeque,
   fs::{File, OpenOptions},
@@ -18,9 +18,7 @@ use ratatui::{
   layout::{Alignment, Constraint, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{
-    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Table, TableState, Wrap,
-  },
+  widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Table, TableState, Wrap},
 };
 
 use crate::installer::Signal;
@@ -47,7 +45,12 @@ impl PackageManager {
       .iter()
       .filter_map(|p| all_packages.binary_search(p).ok())
       .collect();
-    let mut pm = Self { all: all_packages, selected, available: Vec::new(), filter: None };
+    let mut pm = Self {
+      all: all_packages,
+      selected,
+      available: Vec::new(),
+      filter: None,
+    };
     pm.recompute();
     pm
   }
@@ -181,12 +184,7 @@ impl WidgetBoxBuilder {
       .layout
       .unwrap_or_else(|| Self::get_default_layout(num_widgets));
     let render_borders = self.render_borders.unwrap_or(false);
-    WidgetBox::new(
-      title,
-      layout,
-      self.widgets,
-      render_borders,
-    )
+    WidgetBox::new(title, layout, self.widgets, render_borders)
   }
 }
 
@@ -537,8 +535,14 @@ impl LineEditor {
     self.chars.iter().collect()
   }
   fn placeholder_style(&self, highlight: bool) -> Style {
-    let style = Style::default().fg(PLACEHOLDER_FG).add_modifier(Modifier::ITALIC);
-    if highlight { style.bg(Color::Gray) } else { style }
+    let style = Style::default()
+      .fg(PLACEHOLDER_FG)
+      .add_modifier(Modifier::ITALIC);
+    if highlight {
+      style.bg(Color::Gray)
+    } else {
+      style
+    }
   }
   fn get_placeholder_line(&self, focused: bool) -> Line<'_> {
     match self.placeholder.as_deref() {
@@ -562,20 +566,41 @@ impl LineEditor {
       if self.chars.is_empty() {
         return Line::from(Span::raw(" "));
       }
-      return Line::from(Span::raw(self.chars.iter().map(|&c| self.shown(c)).collect::<String>()));
+      return Line::from(Span::raw(
+        self
+          .chars
+          .iter()
+          .map(|&c| self.shown(c))
+          .collect::<String>(),
+      ));
     }
     if self.chars.is_empty() {
       return self.get_placeholder_line(true);
     }
 
     let cursor = self.cursor.min(self.chars.len());
-    let left: String = self.chars[..cursor].iter().map(|&c| self.shown(c)).collect();
-    let cursor_char = self.chars.get(cursor).map_or(" ".to_string(), |&c| self.shown(c).to_string());
-    let right: String = self.chars.get(cursor + 1..).unwrap_or(&[]).iter().map(|&c| self.shown(c)).collect();
+    let left: String = self.chars[..cursor]
+      .iter()
+      .map(|&c| self.shown(c))
+      .collect();
+    let cursor_char = self
+      .chars
+      .get(cursor)
+      .map_or(" ".to_string(), |&c| self.shown(c).to_string());
+    let right: String = self
+      .chars
+      .get(cursor + 1..)
+      .unwrap_or(&[])
+      .iter()
+      .map(|&c| self.shown(c))
+      .collect();
 
     Line::from(vec![
       Span::raw(left),
-      Span::styled(cursor_char, Style::default().add_modifier(Modifier::REVERSED)),
+      Span::styled(
+        cursor_char,
+        Style::default().add_modifier(Modifier::REVERSED),
+      ),
       Span::raw(right),
     ])
   }
@@ -619,7 +644,11 @@ impl ConfigWidget for LineEditor {
       KeyCode::Delete if self.cursor < self.chars.len() => {
         self.chars.remove(self.cursor);
       }
-      KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+      KeyCode::Char(c)
+        if !key
+          .modifiers
+          .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+      {
         self.chars.insert(self.cursor, c);
         self.cursor += 1;
       }
@@ -758,7 +787,11 @@ impl ConfigWidget for StrList {
       .iter()
       .enumerate()
       .map(|(i, &idx)| {
-        let prefix = if Some(i) == self.committed_idx { "> " } else { "  " };
+        let prefix = if Some(i) == self.committed_idx {
+          "> "
+        } else {
+          "  "
+        };
         ListItem::new(Span::raw(format!("{prefix}{}", self.items[idx])))
       })
       .collect();
@@ -775,7 +808,11 @@ impl ConfigWidget for StrList {
       Style::default()
     };
     let list = List::new(items)
-      .block(Block::default().title(self.title.as_str()).borders(Borders::ALL))
+      .block(
+        Block::default()
+          .title(self.title.as_str())
+          .borders(Borders::ALL),
+      )
       .highlight_style(highlight);
 
     f.render_stateful_widget(list, area, &mut state);
@@ -908,14 +945,15 @@ impl<'a> InstallSteps<'a> {
   pub fn start_next_command(&mut self) -> anyhow::Result<()> {
     // Get the next command from the current step
     if let Some(commands) = self.current_step_commands.as_mut()
-      && let Some(mut cmd) = commands.pop_front() {
-        // stdout/stderr are configured by whoever built the command (the
-        // installer redirects them to the log file); never read from the TTY.
-        cmd.stdin(Stdio::null());
+      && let Some(mut cmd) = commands.pop_front()
+    {
+      // stdout/stderr are configured by whoever built the command (the
+      // installer redirects them to the log file); never read from the TTY.
+      cmd.stdin(Stdio::null());
 
-        let child = cmd.spawn()?;
-        self.current_command = Some(child);
-      }
+      let child = cmd.spawn()?;
+      self.current_command = Some(child);
+    }
     Ok(())
   }
 
@@ -930,94 +968,107 @@ impl<'a> InstallSteps<'a> {
         return Ok(());
       }
     }
-  
+
     // keep the spinner alive
     self.throbber_state.calc_next();
-  
+
     // If no command is running but the step has commands, start the next command
     if self.current_command.is_none() && self.current_step_commands.is_some() {
       self.start_next_command()?;
     }
-  
+
     // Poll the running command, if any
     if let Some(child) = &mut self.current_command
-      && let Ok(Some(status)) = child.try_wait() {
-        // command finished
-        self.current_command = None;
-      
-        // success / failure?
-        let failed = match status.code() {
-          Some(0) => false,
-          Some(_) => true,
-          None => {
-            #[cfg(unix)]
-            { status.signal().is_some() }   // e.g. killed by SIGTERM
-            #[cfg(not(unix))]
-            { true }
+      && let Ok(Some(status)) = child.try_wait()
+    {
+      // command finished
+      self.current_command = None;
+
+      // success / failure?
+      let failed = match status.code() {
+        Some(0) => false,
+        Some(_) => true,
+        None => {
+          #[cfg(unix)]
+          {
+            status.signal().is_some()
+          } // e.g. killed by SIGTERM
+          #[cfg(not(unix))]
+          {
+            true
           }
-        };
-      
-        if failed {
-          // === write a clear error line to the log so LogBox can display it ===
-          if let Some(path) = &self.log_path {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-              .create(true)
-              .append(true)
-              .open(path)
-            {
-              let step_no = self.current_step_index + 1;
-              let label = self.steps.get(self.current_step_index)
-                .map(|(l, _)| l.spans.iter().map(|s| s.content.to_string()).collect::<String>())
-                .unwrap_or_else(|| "<unknown step>".to_string());
-            
-              let code = status.code();
-              #[cfg(unix)]
-              let sig = status.signal();
-              #[cfg(not(unix))]
-              let sig: Option<i32> = None;
-            
-              let _ = writeln!(f);
-              let _ = writeln!(f, "-----");
-              let _ = writeln!(
-                f,
-                "✗ Step {step_no} ({label}) failed (exit_code={code:?}, signal={sig:?})"
-              );
-              let _ = writeln!(f, "-----");
-              let _ = f.flush();
-            }
-          }
-          // ===================================================================
-        
-          // mark the step as failed, drop remaining commands of this step
-          if self.current_step_index < self.steps.len() {
-            self.steps[self.current_step_index].1 = StepStatus::Failed;
-          }
-          self.current_step_commands = None;
-        
-          // advance to the next step (we'll start it on the next tick)
-          self.current_step_index += 1;
-          self.running = false;
-        
-          // sticky error flag for UI, but do NOT halt the pipeline
-          self.error = true;
-        
-          return Ok(());
         }
-      
-        // success path: if no more commands in this step, close it as Completed
-        if let Some(commands) = &self.current_step_commands
-          && commands.is_empty() {
-            if self.current_step_index < self.steps.len() {
-              self.steps[self.current_step_index].1 = StepStatus::Completed;
-            }
-            self.current_step_commands = None;
-            self.current_step_index += 1;
-            self.running = false;
+      };
+
+      if failed {
+        // === write a clear error line to the log so LogBox can display it ===
+        if let Some(path) = &self.log_path {
+          use std::io::Write;
+          if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+          {
+            let step_no = self.current_step_index + 1;
+            let label = self
+              .steps
+              .get(self.current_step_index)
+              .map(|(l, _)| {
+                l.spans
+                  .iter()
+                  .map(|s| s.content.to_string())
+                  .collect::<String>()
+              })
+              .unwrap_or_else(|| "<unknown step>".to_string());
+
+            let code = status.code();
+            #[cfg(unix)]
+            let sig = status.signal();
+            #[cfg(not(unix))]
+            let sig: Option<i32> = None;
+
+            let _ = writeln!(f);
+            let _ = writeln!(f, "-----");
+            let _ = writeln!(
+              f,
+              "✗ Step {step_no} ({label}) failed (exit_code={code:?}, signal={sig:?})"
+            );
+            let _ = writeln!(f, "-----");
+            let _ = f.flush();
           }
-          // else: next command of this step will start on the next tick
+        }
+        // ===================================================================
+
+        // mark the step as failed, drop remaining commands of this step
+        if self.current_step_index < self.steps.len() {
+          self.steps[self.current_step_index].1 = StepStatus::Failed;
+        }
+        self.current_step_commands = None;
+
+        // advance to the next step (we'll start it on the next tick)
+        self.current_step_index += 1;
+        self.running = false;
+
+        // sticky error flag for UI, but do NOT halt the pipeline
+        self.error = true;
+
+        return Ok(());
       }
-  
+
+      // success path: if no more commands in this step, close it as Completed
+      if let Some(commands) = &self.current_step_commands
+        && commands.is_empty()
+      {
+        if self.current_step_index < self.steps.len() {
+          self.steps[self.current_step_index].1 = StepStatus::Completed;
+        }
+        self.current_step_commands = None;
+        self.current_step_index += 1;
+        self.running = false;
+      }
+      // else: next command of this step will start on the next tick
+    }
+
     Ok(())
   }
 
@@ -1153,9 +1204,10 @@ impl TableWidget {
   pub fn set_rows(&mut self, rows: Vec<Vec<String>>) {
     self.rows = rows;
     if let Some(idx) = self.selected_row
-      && idx >= self.rows.len() {
-        self.selected_row = None;
-      }
+      && idx >= self.rows.len()
+    {
+      self.selected_row = None;
+    }
   }
   pub fn selected_row(&self) -> Option<usize> {
     self.selected_row
@@ -1418,11 +1470,17 @@ impl PackagePicker {
     let help_content = crate::styled_block(vec![
       vec![(bold, "Tab"), (None, " - Switch between lists and search")],
       vec![(bold, "↑/↓, j/k"), (None, " - Navigate package lists")],
-      vec![(bold, "Enter"), (None, " - Add/remove package to/from selection")],
+      vec![
+        (bold, "Enter"),
+        (None, " - Add/remove package to/from selection"),
+      ],
       vec![(bold, "/"), (None, " - Focus search bar")],
       vec![(bold, "?"), (None, " - Show this help")],
       vec![(None, "")],
-      vec![(None, "Search bar filters packages in real-time as you type.")],
+      vec![(
+        None,
+        "Search bar filters packages in real-time as you type.",
+      )],
       vec![(None, "Filter persists when adding/removing packages.")],
     ]);
     let help_modal = HelpModal::new("Package Picker", help_content);
@@ -1466,16 +1524,30 @@ impl PackagePicker {
   }
 
   fn clamp_cursors(&mut self) {
-    self.selected_cursor = self.selected_cursor.min(self.package_manager.selected_len().saturating_sub(1));
-    self.available_cursor = self.available_cursor.min(self.package_manager.available().len().saturating_sub(1));
+    self.selected_cursor = self
+      .selected_cursor
+      .min(self.package_manager.selected_len().saturating_sub(1));
+    self.available_cursor = self
+      .available_cursor
+      .min(self.package_manager.available().len().saturating_sub(1));
   }
 
   fn apply_search_filter(&mut self) {
-    self.package_manager.set_filter(Some(self.search_bar.value()));
+    self
+      .package_manager
+      .set_filter(Some(self.search_bar.value()));
     self.available_cursor = 0;
   }
 
-  fn render_list(&self, f: &mut Frame, area: Rect, title: &str, idxs: impl Iterator<Item = usize>, cursor: usize, focused: bool) {
+  fn render_list(
+    &self,
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    idxs: impl Iterator<Item = usize>,
+    cursor: usize,
+    focused: bool,
+  ) {
     // Only materialise the rows that can be shown: a 20k-package list would
     // otherwise allocate 20k ListItems per frame.
     let visible = area.height.saturating_sub(2) as usize;
@@ -1485,7 +1557,11 @@ impl PackagePicker {
       .take(visible)
       .map(|i| ListItem::new(self.package_manager.name(i)))
       .collect();
-    let border_color = if focused { Color::Yellow } else { Color::Indexed(242) };
+    let border_color = if focused {
+      Color::Yellow
+    } else {
+      Color::Indexed(242)
+    };
     let list = List::new(items)
       .block(
         Block::default()
@@ -1502,9 +1578,21 @@ impl PackagePicker {
 
 impl ConfigWidget for PackagePicker {
   fn render(&self, f: &mut Frame, area: Rect) {
-    let hor_chunks = split_hor!(area, 0, [Constraint::Percentage(50), Constraint::Percentage(50)]);
-    let vert_chunks_left = split_vert!(hor_chunks[0], 0, [Constraint::Length(5), Constraint::Min(0)]);
-    let vert_chunks_right = split_vert!(hor_chunks[1], 0, [Constraint::Length(5), Constraint::Min(0)]);
+    let hor_chunks = split_hor!(
+      area,
+      0,
+      [Constraint::Percentage(50), Constraint::Percentage(50)]
+    );
+    let vert_chunks_left = split_vert!(
+      hor_chunks[0],
+      0,
+      [Constraint::Length(5), Constraint::Min(0)]
+    );
+    let vert_chunks_right = split_vert!(
+      hor_chunks[1],
+      0,
+      [Constraint::Length(5), Constraint::Min(0)]
+    );
 
     let n_sel = self.package_manager.selected_len();
     let n_avail = self.package_manager.available().len();
@@ -1639,7 +1727,13 @@ impl ConfigWidget for PackagePicker {
   }
 
   fn get_value(&self) -> Option<Value> {
-    Some(Value::Array(self.get_selected_packages().into_iter().map(Value::String).collect()))
+    Some(Value::Array(
+      self
+        .get_selected_packages()
+        .into_iter()
+        .map(Value::String)
+        .collect(),
+    ))
   }
 }
 
@@ -1697,7 +1791,9 @@ impl<'a> LogBox<'a> {
   /// Reopen from the beginning when that happens so no output is missed.
   fn reopen_if_replaced(&mut self) {
     let Some(path) = &self.log_path else { return };
-    let Ok(meta) = std::fs::metadata(path) else { return };
+    let Ok(meta) = std::fs::metadata(path) else {
+      return;
+    };
     if meta.ino() == self.inode {
       return;
     }
@@ -1723,7 +1819,9 @@ impl<'a> LogBox<'a> {
   /// - Detects truncation/rotation and resets cleanly.
   pub fn poll_log(&mut self) -> anyhow::Result<()> {
     self.reopen_if_replaced();
-    let Some(f) = self.reader.as_mut() else { return Ok(()) };
+    let Some(f) = self.reader.as_mut() else {
+      return Ok(());
+    };
 
     let current_size = f.metadata()?.len();
     if current_size < self.file_pos {
@@ -1786,179 +1884,189 @@ impl<'a> ConfigWidget for LogBox<'a> {
     let visible: Vec<Line> = self.line_buf.iter().skip(start).cloned().collect();
 
     let paragraph = Paragraph::new(visible)
-      .block(Block::default().title(self.title.clone()).borders(Borders::ALL))
+      .block(
+        Block::default()
+          .title(self.title.clone())
+          .borders(Borders::ALL),
+      )
       .wrap(Wrap { trim: true });
 
     f.render_widget(paragraph, area);
   }
 
-  fn focus(&mut self)   { self.focused = true; }
-  fn unfocus(&mut self) { self.focused = false; }
-  fn is_focused(&self) -> bool { self.focused }
+  fn focus(&mut self) {
+    self.focused = true;
+  }
+  fn unfocus(&mut self) {
+    self.focused = false;
+  }
+  fn is_focused(&self) -> bool {
+    self.focused
+  }
 }
 
 #[derive(Clone)]
 enum Phase {
-    Typing,
-    FullIdle(Instant),   // when it reached full length; store since
-    Deleting,
+  Typing,
+  FullIdle(Instant), // when it reached full length; store since
+  Deleting,
 }
 
 pub struct FancyTicker {
-    messages: &'static [&'static str],
-    // current: usize, // Used for sequential rotation of messages
-
-    target: String,
-    buf: String,
-    phase: Phase,
-    last_step: Instant,
-    type_interval: Duration,
-    delete_interval: Duration,
-    idle_duration: Duration,
-    leet_chance: f32,
-    swapcase_chance: f32,
-    hue: u16,
+  messages: &'static [&'static str],
+  // current: usize, // Used for sequential rotation of messages
+  target: String,
+  buf: String,
+  phase: Phase,
+  last_step: Instant,
+  type_interval: Duration,
+  delete_interval: Duration,
+  idle_duration: Duration,
+  leet_chance: f32,
+  swapcase_chance: f32,
+  hue: u16,
 }
 
 impl FancyTicker {
-    pub fn new(messages: &'static [&'static str]) -> Self {
-        let first = messages.first().copied().unwrap_or("").to_string();
-        Self {
-            messages,
-            //current: 0, // Used for sequential rotation of messages
-            target: first,
-            buf: String::new(),
-            phase: Phase::Typing,
-            last_step: Instant::now(),
-            type_interval: Duration::from_millis(55),
-            delete_interval: Duration::from_millis(35),
-            idle_duration: Duration::from_millis(1800),
-            leet_chance: 0.12,
-            swapcase_chance: 0.10,
-            hue: 0,
+  pub fn new(messages: &'static [&'static str]) -> Self {
+    let first = messages.first().copied().unwrap_or("").to_string();
+    Self {
+      messages,
+      //current: 0, // Used for sequential rotation of messages
+      target: first,
+      buf: String::new(),
+      phase: Phase::Typing,
+      last_step: Instant::now(),
+      type_interval: Duration::from_millis(55),
+      delete_interval: Duration::from_millis(35),
+      idle_duration: Duration::from_millis(1800),
+      leet_chance: 0.12,
+      swapcase_chance: 0.10,
+      hue: 0,
+    }
+  }
+
+  /// Advance the animation.
+  pub fn tick(&mut self) {
+    let now = Instant::now();
+    match self.phase {
+      Phase::Typing => {
+        if now.duration_since(self.last_step) >= self.type_interval {
+          self.last_step = now;
+          let next_idx = self.buf.len();
+          if next_idx < self.target.len() {
+            let next_char = self.target[next_idx..].chars().next().unwrap();
+            self.buf.push(next_char);
+          }
+          if self.buf.len() == self.target.len() {
+            self.phase = Phase::FullIdle(Instant::now());
+          }
         }
-    }
-
-    /// Advance the animation.
-    pub fn tick(&mut self) {
-        let now = Instant::now();
-        match self.phase {
-            Phase::Typing => {
-                if now.duration_since(self.last_step) >= self.type_interval {
-                    self.last_step = now;
-                    let next_idx = self.buf.len();
-                    if next_idx < self.target.len() {
-                        let next_char = self.target[next_idx..].chars().next().unwrap();
-                        self.buf.push(next_char);
-                    }
-                    if self.buf.len() == self.target.len() {
-                        self.phase = Phase::FullIdle(Instant::now());
-                    }
-                }
-            }
-            Phase::FullIdle(since) => {
-                if now.duration_since(since) >= self.idle_duration {
-                    self.phase = Phase::Deleting;
-                    self.last_step = now;
-                }
-            }
-            Phase::Deleting => {
-                if now.duration_since(self.last_step) >= self.delete_interval {
-                    self.last_step = now;
-                    if !self.buf.is_empty() {
-                        let mut it = self.buf.chars();
-                        it.next();
-                        self.buf = it.collect();
-                    } else {
-                        // rotation here ⤵
-                        //self.current = (self.current + 1) % self.messages.len();
-                        //self.target = self.messages[self.current].clone();
-                        // random rotation of messages
-                        let mut rng = rand::rng();
-                        if let Some(m) = self.messages.choose(&mut rng) {
-                            self.target = (*m).to_string();
-                        }
-                        
-                        self.phase = Phase::Typing;
-                    }
-                }
-            }
+      }
+      Phase::FullIdle(since) => {
+        if now.duration_since(since) >= self.idle_duration {
+          self.phase = Phase::Deleting;
+          self.last_step = now;
         }
-        // keep the colors moving a bit
-        self.hue = self.hue.wrapping_add(4);
-    }
-
-    /// Build a “glitched” version of the current buffer for display.
-    fn stylized(&self) -> String {
-        let mut rng = rand::rng();
-
-        let mut out = String::with_capacity(self.buf.len());
-        for (i, ch) in self.buf.chars().enumerate() {
-            let mut c = ch;
-
-            // swap case sometimes
-            if rng.random::<f32>() < self.swapcase_chance {
-                if c.is_ascii_lowercase() {
-                    c = c.to_ascii_uppercase();
-                } else if c.is_ascii_uppercase() {
-                    c = c.to_ascii_lowercase();
-                }
+      }
+      Phase::Deleting => {
+        if now.duration_since(self.last_step) >= self.delete_interval {
+          self.last_step = now;
+          if !self.buf.is_empty() {
+            let mut it = self.buf.chars();
+            it.next();
+            self.buf = it.collect();
+          } else {
+            // rotation here ⤵
+            //self.current = (self.current + 1) % self.messages.len();
+            //self.target = self.messages[self.current].clone();
+            // random rotation of messages
+            let mut rng = rand::rng();
+            if let Some(m) = self.messages.choose(&mut rng) {
+              self.target = (*m).to_string();
             }
 
-            // inject leet sometimes, only on letters we map
-            if rng.random::<f32>() < self.leet_chance
-                && let Some(sub) = leet_map(c) {
-                    c = sub;
-                }
-
-            // occasionally replace a letter with a transient symbol while typing
-            if matches!(self.phase, Phase::Typing) && rng.random::<f32>() < 0.06 {
-                let fuzz = ['*', '#', '$', '=', '+', '~', '§', 'ø', '¤', '∆'];
-                c = *fuzz.choose(&mut rng).unwrap();
-            }
-
-            // add a subtle breathing space glitch
-            if i % 5 == 0 && rng.random::<f32>() < 0.02 {
-                out.push(' ');
-            }
-
-            out.push(c);
+            self.phase = Phase::Typing;
+          }
         }
-        out
+      }
     }
+    // keep the colors moving a bit
+    self.hue = self.hue.wrapping_add(4);
+  }
 
-    pub fn render(&self, f: &mut Frame, area: Rect) {
-        // Create a cycling color (you can also keep it single-color if you prefer)
-        let color = Color::Indexed(16 + ((self.hue / 6) % 216) as u8); // safe 256-color ramp
+  /// Build a “glitched” version of the current buffer for display.
+  fn stylized(&self) -> String {
+    let mut rng = rand::rng();
 
-        let text = self.stylized();
-        let block = Block::default()
-            .title(Line::from(vec![
-                Span::styled(" ✦ ", Style::default().fg(color)),
-                Span::styled("Vibe-o-Meter", Style::default().fg(Color::Gray)),
-            ]))
-            .borders(Borders::ALL);
+    let mut out = String::with_capacity(self.buf.len());
+    for (i, ch) in self.buf.chars().enumerate() {
+      let mut c = ch;
 
-        let para = Paragraph::new(text)
-            .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
-            .wrap(Wrap { trim: false })
-            .block(block);
+      // swap case sometimes
+      if rng.random::<f32>() < self.swapcase_chance {
+        if c.is_ascii_lowercase() {
+          c = c.to_ascii_uppercase();
+        } else if c.is_ascii_uppercase() {
+          c = c.to_ascii_lowercase();
+        }
+      }
 
-        f.render_widget(para, area);
+      // inject leet sometimes, only on letters we map
+      if rng.random::<f32>() < self.leet_chance
+        && let Some(sub) = leet_map(c)
+      {
+        c = sub;
+      }
+
+      // occasionally replace a letter with a transient symbol while typing
+      if matches!(self.phase, Phase::Typing) && rng.random::<f32>() < 0.06 {
+        let fuzz = ['*', '#', '$', '=', '+', '~', '§', 'ø', '¤', '∆'];
+        c = *fuzz.choose(&mut rng).unwrap();
+      }
+
+      // add a subtle breathing space glitch
+      if i % 5 == 0 && rng.random::<f32>() < 0.02 {
+        out.push(' ');
+      }
+
+      out.push(c);
     }
+    out
+  }
+
+  pub fn render(&self, f: &mut Frame, area: Rect) {
+    // Create a cycling color (you can also keep it single-color if you prefer)
+    let color = Color::Indexed(16 + ((self.hue / 6) % 216) as u8); // safe 256-color ramp
+
+    let text = self.stylized();
+    let block = Block::default()
+      .title(Line::from(vec![
+        Span::styled(" ✦ ", Style::default().fg(color)),
+        Span::styled("Vibe-o-Meter", Style::default().fg(Color::Gray)),
+      ]))
+      .borders(Borders::ALL);
+
+    let para = Paragraph::new(text)
+      .style(Style::default().fg(color).add_modifier(Modifier::BOLD))
+      .wrap(Wrap { trim: false })
+      .block(block);
+
+    f.render_widget(para, area);
+  }
 }
 
 fn leet_map(c: char) -> Option<char> {
-    Some(match c {
-        'a' | 'A' => '4',
-        'e' | 'E' => '3',
-        'i' | 'I' => '1',
-        'o' | 'O' => '0',
-        's' | 'S' => '5',
-        't' | 'T' => '7',
-        'g' | 'G' => '9',
-        _ => return None,
-    })
+  Some(match c {
+    'a' | 'A' => '4',
+    'e' | 'E' => '3',
+    'i' | 'I' => '1',
+    'o' | 'O' => '0',
+    's' | 'S' => '5',
+    't' | 'T' => '7',
+    'g' | 'G' => '9',
+    _ => return None,
+  })
 }
 #[cfg(test)]
 mod tests {
@@ -1990,13 +2098,23 @@ mod tests {
 
   #[test]
   fn str_list_filter_tracks_selection() {
-    let mut l = StrList::new("t", vec!["Europe/Rome".into(), "Asia/Tokyo".into(), "Europe/Berlin".into()]);
+    let mut l = StrList::new(
+      "t",
+      vec![
+        "Europe/Rome".into(),
+        "Asia/Tokyo".into(),
+        "Europe/Berlin".into(),
+      ],
+    );
     l.set_filter(Some("eur"));
     assert_eq!(l.filtered.len(), 2);
     assert!(l.selected_item().unwrap().starts_with("Europe"));
     l.next_item();
     l.handle_input(key(KeyCode::Enter));
-    assert_eq!(l.committed.as_deref(), l.selected_item().map(String::as_str));
+    assert_eq!(
+      l.committed.as_deref(),
+      l.selected_item().map(String::as_str)
+    );
     l.set_filter(None::<String>);
     assert_eq!(l.filtered.len(), 3);
   }
@@ -2011,7 +2129,12 @@ mod tests {
     lb.poll_log().unwrap();
     assert!(lb.line_buf.is_empty(), "starts at EOF");
 
-    std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(b"one\ntwo\npartial").unwrap();
+    std::fs::OpenOptions::new()
+      .append(true)
+      .open(&path)
+      .unwrap()
+      .write_all(b"one\ntwo\npartial")
+      .unwrap();
     lb.poll_log().unwrap();
     assert_eq!(lb.line_buf.len(), 2);
 
@@ -2025,7 +2148,10 @@ mod tests {
 
   #[test]
   fn package_manager_select_deselect() {
-    let mut pm = PackageManager::new(vec!["vim".into(), "nano".into(), "git".into()], &["git".into()]);
+    let mut pm = PackageManager::new(
+      vec!["vim".into(), "nano".into(), "git".into()],
+      &["git".into()],
+    );
     assert_eq!(pm.get_selected_packages(), vec!["git"]);
     assert_eq!(pm.available().len(), 2);
     pm.set_filter(Some("vi".into()));

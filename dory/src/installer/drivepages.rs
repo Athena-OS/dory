@@ -11,7 +11,8 @@ use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt, process::Com
 
 use crate::{
   drives::{
-    DiskItem, PartStatus, Partition, bytes_readable_floor, disk_table, lsblk, parse_sectors, part_table,
+    DiskItem, PartStatus, Partition, bytes_readable_floor, disk_table, lsblk, parse_sectors,
+    part_table,
   },
   installer::{Installer, Page, Signal},
   split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_up,
@@ -215,7 +216,6 @@ impl<'a> Page for Drives<'a> {
       _ => Signal::Wait,
     }
   }
-
 }
 
 pub struct SelectDrive {
@@ -317,7 +317,9 @@ impl Page for SelectDrive {
             .iter()
             .position(|d| d.name() == selected_name)
           else {
-            return Signal::Error(anyhow::anyhow!("Selected drive disappeared after partprobe"));
+            return Signal::Error(anyhow::anyhow!(
+              "Selected drive disappeared after partprobe"
+            ));
           };
 
           // Set drive_config from the refreshed entry
@@ -337,7 +339,6 @@ impl Page for SelectDrive {
       _ => Signal::Wait,
     }
   }
-
 }
 
 pub struct SelectFilesystem {
@@ -621,16 +622,14 @@ impl SelectFilesystem {
         styled_block(vec![
           vec![
             (HIGHLIGHT, "swap"),
-            (None, " is used as virtual memory backing.")
+            (None, " is used as virtual memory backing."),
           ],
           vec![
             (None, "No mount point. Can be "),
             (HIGHLIGHT, "encrypted"),
-            (None, ".")
+            (None, "."),
           ],
-          vec![
-            (None, "Size should fit your needs (RAM/2..RAM, etc).")
-          ],
+          vec![(None, "Size should fit your needs (RAM/2..RAM, etc).")],
         ]),
       ),
       8 => InfoBox::new(
@@ -638,12 +637,15 @@ impl SelectFilesystem {
         styled_block(vec![
           vec![
             (HIGHLIGHT, "'don't format'"),
-            (None, " is used for those partitions you don't want to wipe out.")
+            (
+              None,
+              " is used for those partitions you don't want to wipe out.",
+            ),
           ],
           vec![
             (None, "For example a "),
             (HIGHLIGHT, "boot partition"),
-            (None, " to not delete current bootloader on it.")
+            (None, " to not delete current bootloader on it."),
           ],
         ]),
       ),
@@ -735,13 +737,15 @@ impl Page for SelectFilesystem {
             cfg.assign_device_numbers();
           }
           installer.make_drive_config_display();
-        
+
           // find ROOT id
-          let root_id = installer
-            .drive_config
-            .as_ref()
-            .and_then(|cfg| cfg.partitions().find(|p| p.mount_point() == Some("/")).map(|p| p.id()));
-        
+          let root_id = installer.drive_config.as_ref().and_then(|cfg| {
+            cfg
+              .partitions()
+              .find(|p| p.mount_point() == Some("/"))
+              .map(|p| p.id())
+          });
+
           if let Some(root_id) = root_id {
             // ask if user wants encryption on ROOT; that page will push PromptLuksPassword if needed
             return Signal::Push(Box::new(AskEncryptRoot::new(root_id)));
@@ -778,10 +782,9 @@ impl Page for SelectFilesystem {
       }
       _ => {}
     }
-    
+
     Signal::Wait
   }
-
 }
 
 pub struct SelectSwap {
@@ -790,9 +793,9 @@ pub struct SelectSwap {
 }
 
 impl Default for SelectSwap {
-    fn default() -> Self {
-        Self::new()
-    }
+  fn default() -> Self {
+    Self::new()
+  }
 }
 
 impl SelectSwap {
@@ -809,21 +812,40 @@ impl SelectSwap {
     button_row.focus();
 
     let help_content = styled_block(vec![
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"), (None, " - Navigate")],
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "Enter"), (None, " - Select swap size")],
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "Esc"), (None, " - Go back")],
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "?"), (None, " - Help")],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "↑/↓, j/k"),
+        (None, " - Navigate"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
+        (None, " - Select swap size"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
+        (None, " - Go back"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "?"),
+        (None, " - Help"),
+      ],
       vec![(None, "")],
       vec![(None, "Choose a swap size (or disable swap).")],
     ]);
     let help_modal = HelpModal::new("Select Swap", help_content);
-    Self { buttons: button_row, help_modal }
+    Self {
+      buttons: button_row,
+      help_modal,
+    }
   }
 }
 
 impl Page for SelectSwap {
   fn render(&mut self, _installer: &mut Installer, f: &mut Frame, area: Rect) {
-    let chunks = split_vert!(area, 1, [Constraint::Percentage(70), Constraint::Percentage(30)]);
+    let chunks = split_vert!(
+      area,
+      1,
+      [Constraint::Percentage(70), Constraint::Percentage(30)]
+    );
     let info = InfoBox::new(
       "Swap",
       styled_block(vec![
@@ -839,21 +861,35 @@ impl Page for SelectSwap {
 
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => { self.help_modal.toggle(); Signal::Wait }
-      ui_close!() if self.help_modal.visible => { self.help_modal.hide(); Signal::Wait }
+      KeyCode::Char('?') => {
+        self.help_modal.toggle();
+        Signal::Wait
+      }
+      ui_close!() if self.help_modal.visible => {
+        self.help_modal.hide();
+        Signal::Wait
+      }
       _ if self.help_modal.visible => Signal::Wait,
       ui_back!() => Signal::Pop,
-      ui_up!() => { self.buttons.prev_child(); Signal::Wait }
-      ui_down!() => { self.buttons.next_child(); Signal::Wait }
+      ui_up!() => {
+        self.buttons.prev_child();
+        Signal::Wait
+      }
+      ui_down!() => {
+        self.buttons.next_child();
+        Signal::Wait
+      }
       ui_enter!() => {
-        let Some(idx) = self.buttons.selected_child() else { return Signal::Wait; };
+        let Some(idx) = self.buttons.selected_child() else {
+          return Signal::Wait;
+        };
         installer.swap = match idx {
-          0 => None,                // No swap
+          0 => None, // No swap
           1 => Some(1),
           2 => Some(2),
           3 => Some(4),
           4 => Some(8),
-          5 => return Signal::Pop,  // Back
+          5 => return Signal::Pop, // Back
           _ => return Signal::Wait,
         };
         Signal::Push(Box::new(SelectFilesystem::new(None)))
@@ -861,7 +897,6 @@ impl Page for SelectSwap {
       _ => Signal::Wait,
     }
   }
-
 }
 
 pub struct ManualPartition {
@@ -935,16 +970,16 @@ impl Page for ManualPartition {
     self.disk_config.set_rows(rows);
     let len = self.disk_config.len() as u16;
     let table_pct = (20 + 5 * len).min(70); // cap at 70%
-    let padding  = 70 - table_pct;
+    let padding = 70 - table_pct;
 
     let chunks = split_vert!(
-        area,
-        1,
-        [
-            Constraint::Percentage(table_pct),
-            Constraint::Percentage(30),
-            Constraint::Percentage(padding),
-        ]
+      area,
+      1,
+      [
+        Constraint::Percentage(table_pct),
+        Constraint::Percentage(30),
+        Constraint::Percentage(padding),
+      ]
     );
     let hor_chunks = split_hor!(
       chunks[1],
@@ -1110,7 +1145,6 @@ impl Page for ManualPartition {
       self.handle_input(installer, event)
     }
   }
-
 }
 
 pub struct NewPartition {
@@ -1118,7 +1152,7 @@ pub struct NewPartition {
   pub part_start: u64,
   pub part_end: u64,
   pub sector_size: u64,
-  pub total_size: u64, // sectors
+  pub total_size: u64,      // sectors
   pub max_fit: Option<u64>, // sectors
 
   pub new_part_size: Option<u64>, // sectors
@@ -1208,86 +1242,97 @@ impl NewPartition {
     if let Some(m) = self.max_fit {
       return m;
     }
-    let best = self.live_max_size_sectors(installer).unwrap_or(self.total_size);
+    let best = self
+      .live_max_size_sectors(installer)
+      .unwrap_or(self.total_size);
     self.max_fit = Some(best);
     best
   }
   fn finalize_new_partition(&mut self, installer: &mut Installer) -> Signal {
-      let Some(ref mut device) = installer.drive_config else {
-          // still bail here — this is a real internal error
-          return Signal::Error(anyhow::anyhow!(
-              "No drive config available when finalizing new partition"
-          ));
-      };
+    let Some(ref mut device) = installer.drive_config else {
+      // still bail here — this is a real internal error
+      return Signal::Error(anyhow::anyhow!(
+        "No drive config available when finalizing new partition"
+      ));
+    };
 
-      let is_swap = self.new_part_fs.as_deref() == Some("swap");
+    let is_swap = self.new_part_fs.as_deref() == Some("swap");
 
-      let mut flags = if !is_swap && self.new_part_mount_point.as_deref() == Some("/efi") {
-          vec!["boot".to_string(), "esp".to_string()]
-      } else if !is_swap && self.new_part_mount_point.as_deref() == Some("/boot") {
-          vec!["bls_boot".to_string()]
-      } else {
-          Vec::new() // Default case to ensure `flags` is always a Vec<String>
-      };
-      if self.new_part_encrypt.unwrap_or(false) {
-          flags.push("encrypt".to_string());
+    let mut flags = if !is_swap && self.new_part_mount_point.as_deref() == Some("/efi") {
+      vec!["boot".to_string(), "esp".to_string()]
+    } else if !is_swap && self.new_part_mount_point.as_deref() == Some("/boot") {
+      vec!["bls_boot".to_string()]
+    } else {
+      Vec::new() // Default case to ensure `flags` is always a Vec<String>
+    };
+    if self.new_part_encrypt.unwrap_or(false) {
+      flags.push("encrypt".to_string());
+    }
+    let Some(size) = self.new_part_size else {
+      // user-facing validation should have set this already
+      return Signal::Error(anyhow::anyhow!(
+        "No new partition size specified when finalizing new partition"
+      ));
+    };
+
+    let auto_label = if is_swap {
+      Some("SWAP".to_string())
+    } else {
+      match self.new_part_mount_point.as_deref() {
+        Some("/efi") => Some("ESP".to_string()),
+        Some("/boot") => Some("XBOOTLDR".to_string()),
+        Some("/") => Some("ROOT".to_string()),
+        _ => None,
       }
-      let Some(size) = self.new_part_size else {
-          // user-facing validation should have set this already
-          return Signal::Error(anyhow::anyhow!(
-              "No new partition size specified when finalizing new partition"
-          ));
-      };
+    };
 
-      let auto_label = if is_swap {
-        Some("SWAP".to_string())
-      } else {
-        match self.new_part_mount_point.as_deref() {
-          Some("/efi") => Some("ESP".to_string()),
-          Some("/boot") => Some("XBOOTLDR".to_string()),
-          Some("/")     => Some("ROOT".to_string()),
-          _             => None,
-        }
-      };
+    // swap must not have a mount point
+    let mp = if is_swap {
+      None
+    } else {
+      self.new_part_mount_point.clone()
+    };
 
-      // swap must not have a mount point
-      let mp = if is_swap { None } else { self.new_part_mount_point.clone() };
+    let mut new_part = Partition::new(
+      self.part_start,
+      size,
+      self.sector_size,
+      PartStatus::Create,
+      None,
+      self.new_part_fs.clone(),
+      mp,
+      auto_label,
+      false,
+      flags,
+    );
 
-      let mut new_part = Partition::new(
-          self.part_start,
-          size,
-          self.sector_size,
-          PartStatus::Create,
-          None,
-          self.new_part_fs.clone(),
-          mp,
-          auto_label,
-          false,
-          flags,
-      );
-
-      if self.new_part_encrypt == Some(true)
-        && let Some(pw) = &self.new_part_luks_password
-      {
-        let luks_path = luks_keyfile_path(new_part.id());
-        if let Err(e) = write_luks_key_to_tmpfs(pw, &luks_path) {
-          return Signal::Error(anyhow::anyhow!("Failed to write {luks_path}: {e}"));
-        }
-        new_part.set_luks_keyfile(Some(luks_path));
+    if self.new_part_encrypt == Some(true)
+      && let Some(pw) = &self.new_part_luks_password
+    {
+      let luks_path = luks_keyfile_path(new_part.id());
+      if let Err(e) = write_luks_key_to_tmpfs(pw, &luks_path) {
+        return Signal::Error(anyhow::anyhow!("Failed to write {luks_path}: {e}"));
       }
+      new_part.set_luks_keyfile(Some(luks_path));
+    }
 
-      match device.new_partition(new_part) {
-        Ok(_) => { device.assign_device_numbers(); Signal::Pop }
-        Err(e) => {
-          self.size_input.error(format!("Failed to create partition: {e}"));
-          self.new_part_size = None;           // return to size screen
-          self.fs_buttons.unfocus();
-          self.mount_input.unfocus();
-          self.enc_widgets.unfocus();
-          self.size_input.focus();
-          Signal::Wait
-        }
+    match device.new_partition(new_part) {
+      Ok(_) => {
+        device.assign_device_numbers();
+        Signal::Pop
       }
+      Err(e) => {
+        self
+          .size_input
+          .error(format!("Failed to create partition: {e}"));
+        self.new_part_size = None; // return to size screen
+        self.fs_buttons.unfocus();
+        self.mount_input.unfocus();
+        self.enc_widgets.unfocus();
+        self.size_input.focus();
+        Signal::Wait
+      }
+    }
   }
   fn live_max_size_sectors(&self, installer: &Installer) -> Option<u64> {
     let drive = installer.drive_config.as_ref()?;
@@ -1296,48 +1341,86 @@ impl NewPartition {
       .layout()
       .iter()
       .find_map(|it| match it {
-        DiskItem::FreeSpace { id, start, size } if *id == self.fs_id && *start == self.part_start => Some(*size),
+        DiskItem::FreeSpace { id, start, size }
+          if *id == self.fs_id && *start == self.part_start =>
+        {
+          Some(*size)
+        }
         _ => None,
       })
       .or(Some(self.total_size)) // fallback to initial snapshot
   }
   pub fn render_size_input(&mut self, f: &mut Frame, area: Rect, max_fit: u64) {
-    let chunks = split_vert!(area, 1, [
+    let chunks = split_vert!(
+      area,
+      1,
+      [
         Constraint::Percentage(40),
         Constraint::Length(7),
         Constraint::Percentage(40),
-    ]);
-    let hor_chunks = split_hor!(chunks[1], 1, [
+      ]
+    );
+    let hor_chunks = split_hor!(
+      chunks[1],
+      1,
+      [
         Constraint::Percentage(33),
         Constraint::Percentage(34),
         Constraint::Percentage(33),
-    ]);
+      ]
+    );
 
     let max_bytes = (max_fit as u128) * (self.sector_size as u128);
-    let max_human  = bytes_readable_floor(max_bytes);
+    let max_human = bytes_readable_floor(max_bytes);
 
     let info_box = InfoBox::new(
-        "Free Space Info",
-        styled_block(vec![
-            vec![(HIGHLIGHT, "Sector Size: "), (None, &format!("{}", self.sector_size))],
-            vec![(HIGHLIGHT, "Partition Start Sector: "), (None, &format!("{}", self.part_start))],
-            vec![(HIGHLIGHT, "Partition End Sector: "), (None, &format!("{}", self.part_end))],
-            vec![(HIGHLIGHT, "Max allocatable now: "),
-                 (None, &format!("{max_human} ({max_fit} sectors)"))],
-            vec![(None, "")],
-            vec![(None, "Enter the desired size...")],
-            vec![(None, "Examples: "), (Some((Color::Green, Modifier::BOLD)), "10GiB"),
-                 (None, ", "), (Some((Color::Green, Modifier::BOLD)), "500MiB"),
-                 (None, ", "), (Some((Color::Green, Modifier::BOLD)), "100%")],
-        ]),
+      "Free Space Info",
+      styled_block(vec![
+        vec![
+          (HIGHLIGHT, "Sector Size: "),
+          (None, &format!("{}", self.sector_size)),
+        ],
+        vec![
+          (HIGHLIGHT, "Partition Start Sector: "),
+          (None, &format!("{}", self.part_start)),
+        ],
+        vec![
+          (HIGHLIGHT, "Partition End Sector: "),
+          (None, &format!("{}", self.part_end)),
+        ],
+        vec![
+          (HIGHLIGHT, "Max allocatable now: "),
+          (None, &format!("{max_human} ({max_fit} sectors)")),
+        ],
+        vec![(None, "")],
+        vec![(None, "Enter the desired size...")],
+        vec![
+          (None, "Examples: "),
+          (Some((Color::Green, Modifier::BOLD)), "10GiB"),
+          (None, ", "),
+          (Some((Color::Green, Modifier::BOLD)), "500MiB"),
+          (None, ", "),
+          (Some((Color::Green, Modifier::BOLD)), "100%"),
+        ],
+      ]),
     );
     info_box.render(f, chunks[0]);
     self.size_input.render(f, hor_chunks[1]);
   }
-  pub fn handle_input_encryption_select(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
+  pub fn handle_input_encryption_select(
+    &mut self,
+    installer: &mut Installer,
+    event: KeyEvent,
+  ) -> Signal {
     match event.code {
-      ui_up!() => { self.enc_widgets.prev_child(); Signal::Wait }
-      ui_down!() => { self.enc_widgets.next_child(); Signal::Wait }
+      ui_up!() => {
+        self.enc_widgets.prev_child();
+        Signal::Wait
+      }
+      ui_down!() => {
+        self.enc_widgets.next_child();
+        Signal::Wait
+      }
       KeyCode::Esc => {
         if self.new_part_fs.as_deref() == Some("swap") {
           // go back to filesystem selection when editing swap
@@ -1355,16 +1438,18 @@ impl NewPartition {
         Signal::Wait
       }
       KeyCode::Char(' ') => {
-          if let Some(child) = self.enc_widgets.focused_child_mut() {
-              child.interact();
-              if let Some(Value::Bool(checked)) = child.get_value() {
-                  self.enc_selected = checked;
-              }
+        if let Some(child) = self.enc_widgets.focused_child_mut() {
+          child.interact();
+          if let Some(Value::Bool(checked)) = child.get_value() {
+            self.enc_selected = checked;
           }
-          Signal::Wait
+        }
+        Signal::Wait
       }
       KeyCode::Enter => {
-        let Some(idx) = self.enc_widgets.selected_child() else { return Signal::Wait; };
+        let Some(idx) = self.enc_widgets.selected_child() else {
+          return Signal::Wait;
+        };
         match idx {
           0 => {
             // Toggle checkbox
@@ -1376,7 +1461,8 @@ impl NewPartition {
             }
             Signal::Wait
           }
-          1 => { // Continue
+          1 => {
+            // Continue
             self.new_part_encrypt = Some(self.enc_selected);
             if self.enc_selected {
               // ask for password inline
@@ -1407,10 +1493,14 @@ impl NewPartition {
       KeyCode::Enter => {
         let input = self.size_input.value();
         let mut input = input.trim();
-        if input.is_empty() { input = "100%"; }
+        if input.is_empty() {
+          input = "100%";
+        }
 
         let Some(ref device) = installer.drive_config else {
-          return Signal::Error(anyhow::anyhow!("No drive config available for new partition size input"));
+          return Signal::Error(anyhow::anyhow!(
+            "No drive config available for new partition size input"
+          ));
         };
 
         let max_fit = self.compute_max_fit(installer);
@@ -1455,9 +1545,21 @@ impl NewPartition {
     let info_box = InfoBox::new(
       "Encryption",
       styled_block(vec![
-        vec![(None, "Choose whether to encrypt this partition with "), (HIGHLIGHT, "LUKS"), (None, ".")],
-        vec![(None, "If enabled, the installer will create a "), (HIGHLIGHT, "LUKS container"), (None, " and put the filesystem inside it.")],
-        vec![(None, "You can use this for "), (HIGHLIGHT, "root (/), /home, /var"), (None, " ecc. ")],
+        vec![
+          (None, "Choose whether to encrypt this partition with "),
+          (HIGHLIGHT, "LUKS"),
+          (None, "."),
+        ],
+        vec![
+          (None, "If enabled, the installer will create a "),
+          (HIGHLIGHT, "LUKS container"),
+          (None, " and put the filesystem inside it."),
+        ],
+        vec![
+          (None, "You can use this for "),
+          (HIGHLIGHT, "root (/), /home, /var"),
+          (None, " ecc. "),
+        ],
       ]),
     );
     info_box.render(f, chunks[0]);
@@ -1466,16 +1568,24 @@ impl NewPartition {
 
   fn render_password_input(&mut self, f: &mut Frame, area: Rect) {
     // Match PromptLuksPassword look: centered 60% column, two rows of height 5
-    let hor = split_hor!(area, 1, [
-      Constraint::Percentage(20),
-      Constraint::Percentage(60),
-      Constraint::Percentage(20),
-    ]);
-    let col = split_vert!(hor[1], 1, [
-      Constraint::Length(5), // pass
-      Constraint::Length(5), // confirm
-      Constraint::Min(0),
-    ]);
+    let hor = split_hor!(
+      area,
+      1,
+      [
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+      ]
+    );
+    let col = split_vert!(
+      hor[1],
+      1,
+      [
+        Constraint::Length(5), // pass
+        Constraint::Length(5), // confirm
+        Constraint::Min(0),
+      ]
+    );
 
     self.pass1.render(f, col[0]);
     self.pass2.render(f, col[1]);
@@ -1493,7 +1603,8 @@ impl NewPartition {
       Tab => {
         // forward cycle: pass1 -> pass2 -> pass1
         if self.pass1.is_focused() {
-          let v = self.pass1
+          let v = self
+            .pass1
             .get_value()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
@@ -1528,13 +1639,16 @@ impl NewPartition {
       Enter => {
         // Enter should behave like "Next" when on first field and "Confirm" when on second
         if self.pass1.is_focused() {
-          let v = self.pass1
+          let v = self
+            .pass1
             .get_value()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
           let v = v.trim();
           if v.len() < 8 {
-            self.pass1.error("Passphrase must be at least 8 characters.");
+            self
+              .pass1
+              .error("Passphrase must be at least 8 characters.");
             return Signal::Wait;
           }
           self.pass1.clear_error();
@@ -1544,11 +1658,13 @@ impl NewPartition {
         }
 
         if self.pass2.is_focused() {
-          let p1 = self.pass1
+          let p1 = self
+            .pass1
             .get_value()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
-          let p2 = self.pass2
+          let p2 = self
+            .pass2
             .get_value()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
@@ -1561,7 +1677,9 @@ impl NewPartition {
           }
           if p1.len() < 8 {
             // belt and suspenders in case user tabbed back
-            self.pass1.error("Passphrase must be at least 8 characters.");
+            self
+              .pass1
+              .error("Passphrase must be at least 8 characters.");
             self.pass2.unfocus();
             self.pass1.focus();
             return Signal::Wait;
@@ -1625,7 +1743,10 @@ impl NewPartition {
       ui_back!() => {
         self.new_part_size = None;
         self.fs_buttons.unfocus();
-        self.size_input = LineEditor::new("New Partition Size", Some("Empty input uses rest of free space"));
+        self.size_input = LineEditor::new(
+          "New Partition Size",
+          Some("Empty input uses rest of free space"),
+        );
         self.size_input.focus();
         Signal::Wait
       }
@@ -1663,7 +1784,7 @@ impl NewPartition {
           self.enc_widgets.first_child();
           self.enc_widgets.focus();
           return Signal::Wait;
-        }        
+        }
         self.mount_input.focus();
         Signal::Wait
       }
@@ -1730,7 +1851,7 @@ impl NewPartition {
       ui_back!() => {
         self.new_part_mount_point = None;
         self.mount_input.unfocus();
-        self.new_part_fs = None;            // <- chiave per far renderizzare la schermata FS
+        self.new_part_fs = None; // <- chiave per far renderizzare la schermata FS
         self.fs_buttons.first_child();
         self.fs_buttons.focus();
         Signal::Wait
@@ -1744,10 +1865,10 @@ impl NewPartition {
           ));
         };
         let taken_mounts: Vec<String> = device
-            .partitions()
-            .filter(|p| *p.status() != PartStatus::Delete)
-            .filter_map(|p| p.mount_point().map(|s| s.to_string()))
-            .collect();
+          .partitions()
+          .filter(|p| *p.status() != PartStatus::Delete)
+          .filter_map(|p| p.mount_point().map(|s| s.to_string()))
+          .collect();
 
         if let Err(err) = SetMountPoint::validate_mount_point(input, &taken_mounts) {
           self.mount_input.error(&err);
@@ -1759,7 +1880,9 @@ impl NewPartition {
         self.mount_input.unfocus();
 
         // If /boot or /efi, don't ask for encryption
-        if self.new_part_mount_point.as_deref() == Some("/boot") || self.new_part_mount_point.as_deref() == Some("/efi") {
+        if self.new_part_mount_point.as_deref() == Some("/boot")
+          || self.new_part_mount_point.as_deref() == Some("/efi")
+        {
           self.new_part_encrypt = Some(false);
           return self.finalize_new_partition(installer);
         }
@@ -1791,7 +1914,10 @@ impl Page for NewPartition {
       self.render_password_input(f, area);
     } else if self.new_part_mount_point.is_none() {
       self.render_mount_point_input(f, area);
-    } else if self.new_part_encrypt.is_none() && (self.new_part_mount_point.as_deref() != Some("/boot") && self.new_part_mount_point.as_deref() != Some("/efi")) {
+    } else if self.new_part_encrypt.is_none()
+      && (self.new_part_mount_point.as_deref() != Some("/boot")
+        && self.new_part_mount_point.as_deref() != Some("/efi"))
+    {
       self.render_encryption_select(f, area);
     }
   }
@@ -1806,7 +1932,10 @@ impl Page for NewPartition {
       self.handle_input_password(installer, event)
     } else if self.new_part_mount_point.is_none() {
       self.handle_input_mount_point(installer, event)
-    } else if self.new_part_encrypt.is_none() && (self.new_part_mount_point.as_deref() != Some("/boot") && self.new_part_mount_point.as_deref() != Some("/efi")) {
+    } else if self.new_part_encrypt.is_none()
+      && (self.new_part_mount_point.as_deref() != Some("/boot")
+        && self.new_part_mount_point.as_deref() != Some("/efi"))
+    {
       self.handle_input_encryption_select(installer, event)
     } else {
       Signal::Pop
@@ -1844,25 +1973,54 @@ impl AlterPartition {
     if let Some(child) = self.buttons.focused_child_mut() {
       child.interact();
       if let Some(Value::Bool(checked)) = child.get_value()
-        && let Some(part) = device.partition_by_id_mut(self.part_id) {
-          // which checkbox are we on?
-          let idx = self.buttons.selected_child().unwrap_or(usize::MAX);
-          if self.is_swap {
-            // Modify/Create (swap): only one checkbox at index 0 = encrypt
-            if idx == 0 {
-              if checked { part.add_flag("encrypt"); } else { part.remove_flag("encrypt"); }
-            }
-          } else {
-            // Modify/Create (non-swap): boot(1) esp(2) bls_boot(3) encrypt(4)
-            match idx {
-              1 => if checked { part.add_flag("boot");     } else { part.remove_flag("boot");     },
-              2 => if checked { part.add_flag("esp");      } else { part.remove_flag("esp");      },
-              3 => if checked { part.add_flag("bls_boot"); } else { part.remove_flag("bls_boot"); },
-              4 => if checked { part.add_flag("encrypt");  } else { part.remove_flag("encrypt");  },
-              _ => {}
+        && let Some(part) = device.partition_by_id_mut(self.part_id)
+      {
+        // which checkbox are we on?
+        let idx = self.buttons.selected_child().unwrap_or(usize::MAX);
+        if self.is_swap {
+          // Modify/Create (swap): only one checkbox at index 0 = encrypt
+          if idx == 0 {
+            if checked {
+              part.add_flag("encrypt");
+            } else {
+              part.remove_flag("encrypt");
             }
           }
+        } else {
+          // Modify/Create (non-swap): boot(1) esp(2) bls_boot(3) encrypt(4)
+          match idx {
+            1 => {
+              if checked {
+                part.add_flag("boot");
+              } else {
+                part.remove_flag("boot");
+              }
+            }
+            2 => {
+              if checked {
+                part.add_flag("esp");
+              } else {
+                part.remove_flag("esp");
+              }
+            }
+            3 => {
+              if checked {
+                part.add_flag("bls_boot");
+              } else {
+                part.remove_flag("bls_boot");
+              }
+            }
+            4 => {
+              if checked {
+                part.add_flag("encrypt");
+              } else {
+                part.remove_flag("encrypt");
+              }
+            }
+            _ => {}
+          }
         }
+      }
     }
   }
   fn buttons_by_status(
@@ -1879,7 +2037,10 @@ impl AlterPartition {
           Box::new(Button::new("Back")),
         ],
         PartStatus::Modify => vec![
-          Box::new(CheckBox::new("Encryption (LUKS)", flags.contains(&"encrypt".into()))),
+          Box::new(CheckBox::new(
+            "Encryption (LUKS)",
+            flags.contains(&"encrypt".into()),
+          )),
           Box::new(Button::new("Change Filesystem")),
           Box::new(Button::new("Set Label")),
           Box::new(Button::new("Unmark for modification")),
@@ -1887,7 +2048,10 @@ impl AlterPartition {
           Box::new(Button::new("Back")),
         ],
         PartStatus::Create => vec![
-          Box::new(CheckBox::new("Encryption (LUKS)", flags.contains(&"encrypt".into()))),
+          Box::new(CheckBox::new(
+            "Encryption (LUKS)",
+            flags.contains(&"encrypt".into()),
+          )),
           Box::new(Button::new("Change Filesystem")),
           Box::new(Button::new("Set Label")),
           Box::new(Button::new("Delete Partition")),
@@ -1905,10 +2069,22 @@ impl AlterPartition {
         ],
         PartStatus::Modify => vec![
           Box::new(Button::new("Set Mount Point")),
-          Box::new(CheckBox::new("Mark as bootable partition", flags.contains(&"boot".into()))),
-          Box::new(CheckBox::new("Mark as ESP partition",      flags.contains(&"esp".into()))),
-          Box::new(CheckBox::new("Mark as XBOOTLDR partition", flags.contains(&"bls_boot".into()))),
-          Box::new(CheckBox::new("Encryption (LUKS)",          flags.contains(&"encrypt".into()))),
+          Box::new(CheckBox::new(
+            "Mark as bootable partition",
+            flags.contains(&"boot".into()),
+          )),
+          Box::new(CheckBox::new(
+            "Mark as ESP partition",
+            flags.contains(&"esp".into()),
+          )),
+          Box::new(CheckBox::new(
+            "Mark as XBOOTLDR partition",
+            flags.contains(&"bls_boot".into()),
+          )),
+          Box::new(CheckBox::new(
+            "Encryption (LUKS)",
+            flags.contains(&"encrypt".into()),
+          )),
           Box::new(Button::new("Change Filesystem")),
           Box::new(Button::new("Set Label")),
           Box::new(Button::new("Unmark for modification")),
@@ -1917,10 +2093,22 @@ impl AlterPartition {
         ],
         PartStatus::Create => vec![
           Box::new(Button::new("Set Mount Point")),
-          Box::new(CheckBox::new("Mark as bootable partition", flags.contains(&"boot".into()))),
-          Box::new(CheckBox::new("Mark as ESP partition",      flags.contains(&"esp".into()))),
-          Box::new(CheckBox::new("Mark as XBOOTLDR partition", flags.contains(&"bls_boot".into()))),
-          Box::new(CheckBox::new("Encryption (LUKS)",          flags.contains(&"encrypt".into()))),
+          Box::new(CheckBox::new(
+            "Mark as bootable partition",
+            flags.contains(&"boot".into()),
+          )),
+          Box::new(CheckBox::new(
+            "Mark as ESP partition",
+            flags.contains(&"esp".into()),
+          )),
+          Box::new(CheckBox::new(
+            "Mark as XBOOTLDR partition",
+            flags.contains(&"bls_boot".into()),
+          )),
+          Box::new(CheckBox::new(
+            "Encryption (LUKS)",
+            flags.contains(&"encrypt".into()),
+          )),
           Box::new(Button::new("Change Filesystem")),
           Box::new(Button::new("Set Label")),
           Box::new(Button::new("Delete Partition")),
@@ -1931,24 +2119,51 @@ impl AlterPartition {
     }
   }
   fn render_existing_part(&self, f: &mut Frame, area: Rect) {
-    let chunks = split_vert!(area, 1, [Constraint::Percentage(70), Constraint::Percentage(30)]);
+    let chunks = split_vert!(
+      area,
+      1,
+      [Constraint::Percentage(70), Constraint::Percentage(30)]
+    );
     let info_box = if self.is_swap {
       InfoBox::new(
         "Alter Existing Swap Partition",
         styled_block(vec![
-          vec![(None, "Choose an action to perform on the selected swap partition.")],
-          vec![(None, "- "),
-              (Some((Color::Green, Modifier::BOLD)), "'Mark For Modification'"),
-              (None, " will flag this partition to be reformatted during installation.")],
+          vec![(
+            None,
+            "Choose an action to perform on the selected swap partition.",
+          )],
+          vec![
+            (None, "- "),
+            (
+              Some((Color::Green, Modifier::BOLD)),
+              "'Mark For Modification'",
+            ),
+            (
+              None,
+              " will flag this partition to be reformatted during installation.",
+            ),
+          ],
         ]),
       )
     } else {
       InfoBox::new(
         "Alter Existing Partition",
         styled_block(vec![
-          vec![(None, "Choose an action to perform on the selected partition.")],
-          vec![(None, "- "), (Some((Color::Green, Modifier::BOLD)), "'Mark For Modification'"),
-              (None, " will flag this partition to be reformatted during installation.")],
+          vec![(
+            None,
+            "Choose an action to perform on the selected partition.",
+          )],
+          vec![
+            (None, "- "),
+            (
+              Some((Color::Green, Modifier::BOLD)),
+              "'Mark For Modification'",
+            ),
+            (
+              None,
+              " will flag this partition to be reformatted during installation.",
+            ),
+          ],
         ]),
       )
     };
@@ -1957,20 +2172,26 @@ impl AlterPartition {
   }
 
   fn render_modify_part(&self, f: &mut Frame, area: Rect) {
-    let chunks = split_vert!(area, 1, [Constraint::Percentage(70), Constraint::Percentage(30)]);
+    let chunks = split_vert!(
+      area,
+      1,
+      [Constraint::Percentage(70), Constraint::Percentage(30)]
+    );
     let info_box = if self.is_swap {
       InfoBox::new(
         "Alter Swap (Marked for Modification)",
-        styled_block(vec![
-          vec![(None, "This swap partition is marked for modification. You can enable relabel, or delete it.")],
-        ]),
+        styled_block(vec![vec![(
+          None,
+          "This swap partition is marked for modification. You can enable relabel, or delete it.",
+        )]]),
       )
     } else {
       InfoBox::new(
         "Alter Partition (Marked for Modification)",
-        styled_block(vec![
-          vec![(None, "This partition is marked for modification. You can change its mount point, flags, filesystem, or delete it.")],
-        ]),
+        styled_block(vec![vec![(
+          None,
+          "This partition is marked for modification. You can change its mount point, flags, filesystem, or delete it.",
+        )]]),
       )
     };
     info_box.render(f, chunks[0]);
@@ -1978,12 +2199,17 @@ impl AlterPartition {
   }
 
   fn render_delete_part(&self, f: &mut Frame, area: Rect) {
-    let chunks = split_vert!(area, 1, [Constraint::Percentage(70), Constraint::Percentage(30)]);
+    let chunks = split_vert!(
+      area,
+      1,
+      [Constraint::Percentage(70), Constraint::Percentage(30)]
+    );
     let info_box = InfoBox::new(
       "Deleted Partition",
-      styled_block(vec![
-        vec![(None, "This partition has been marked for deletion.")],
-      ]),
+      styled_block(vec![vec![(
+        None,
+        "This partition has been marked for deletion.",
+      )]]),
     );
     info_box.render(f, chunks[0]);
     self.buttons.render(f, chunks[1]);
@@ -2023,8 +2249,14 @@ impl Page for AlterPartition {
 
     match event.code {
       ui_back!() => Signal::Pop,
-      ui_up!() => { self.buttons.prev_child(); Signal::Wait}
-      ui_down!() => { self.buttons.next_child(); Signal::Wait}
+      ui_up!() => {
+        self.buttons.prev_child();
+        Signal::Wait
+      }
+      ui_down!() => {
+        self.buttons.next_child();
+        Signal::Wait
+      }
 
       // Space toggles checkboxes
       _ if is_checkbox_toggle_key => {
@@ -2033,7 +2265,9 @@ impl Page for AlterPartition {
           if let Some(p) = device.partition_by_id_mut(self.part_id) {
             let now_enc = p.flags().iter().any(|f| f == "encrypt");
             if now_enc {
-              return Signal::Push(Box::new(PromptLuksPassword::new(self.part_id).with_pop_count(1)));
+              return Signal::Push(Box::new(
+                PromptLuksPassword::new(self.part_id).with_pop_count(1),
+              ));
             }
           }
         }
@@ -2044,50 +2278,63 @@ impl Page for AlterPartition {
         if self.part_status == PartStatus::Delete {
           return Signal::Pop;
         }
-        let Some(idx) = self.buttons.selected_child() else { return Signal::Wait; };
+        let Some(idx) = self.buttons.selected_child() else {
+          return Signal::Wait;
+        };
         let Some(ref mut device) = installer.drive_config else {
-          return Signal::Error(anyhow::anyhow!("No drive config available for altering partition"));
+          return Signal::Error(anyhow::anyhow!(
+            "No drive config available for altering partition"
+          ));
         };
 
         match self.part_status {
           PartStatus::Exists => {
-              let Some(part) = device.partition_by_id_mut(self.part_id) else {
-                  return Signal::Error(anyhow::anyhow!("No partition found with id {}", self.part_id));
-              };
-              match idx {
-                  0 => { // Mark for modification
-                      part.set_status(PartStatus::Modify);
-                      self.refresh_menu_from_device(device);
-                      Signal::Wait
-                  }
-                  1 => Signal::Pop, // Back
-                  _ => Signal::Wait,
+            let Some(part) = device.partition_by_id_mut(self.part_id) else {
+              return Signal::Error(anyhow::anyhow!(
+                "No partition found with id {}",
+                self.part_id
+              ));
+            };
+            match idx {
+              0 => {
+                // Mark for modification
+                part.set_status(PartStatus::Modify);
+                self.refresh_menu_from_device(device);
+                Signal::Wait
               }
+              1 => Signal::Pop, // Back
+              _ => Signal::Wait,
+            }
           }
 
           PartStatus::Modify => {
             if self.is_swap {
               match idx {
-                0 => { // Encrypt toggle
+                0 => {
+                  // Encrypt toggle
                   self.toggle_current_checkbox(device);
                   if let Some(p) = device.partition_by_id_mut(self.part_id) {
                     let now_enc = p.flags().iter().any(|f| f == "encrypt");
                     if now_enc {
-                      return Signal::Push(Box::new(PromptLuksPassword::new(self.part_id).with_pop_count(1)));
+                      return Signal::Push(Box::new(
+                        PromptLuksPassword::new(self.part_id).with_pop_count(1),
+                      ));
                     }
                   }
                   Signal::Wait
                 }
                 1 => Signal::Push(Box::new(SelectFilesystem::new(Some(self.part_id)))), // Change FS
                 2 => Signal::Push(Box::new(SetLabel::new(self.part_id))),
-                3 => { // Unmark
+                3 => {
+                  // Unmark
                   if let Some(p) = device.partition_by_id_mut(self.part_id) {
                     p.set_status(PartStatus::Exists);
                   }
                   self.refresh_menu_from_device(device);
                   Signal::Wait
                 }
-                4 => { // Delete
+                4 => {
+                  // Delete
                   if let Some(p) = device.partition_by_id_mut(self.part_id) {
                     p.set_status(PartStatus::Delete);
                     device.calculate_free_space();
@@ -2100,26 +2347,31 @@ impl Page for AlterPartition {
             } else {
               match idx {
                 0 => Signal::Push(Box::new(SetMountPoint::new(self.part_id))),
-                1..=4 => { // checkboxes
+                1..=4 => {
+                  // checkboxes
                   self.toggle_current_checkbox(device);
                   if let Some(p) = device.partition_by_id_mut(self.part_id) {
                     let now_enc = p.flags().iter().any(|f| f == "encrypt");
                     if now_enc {
-                      return Signal::Push(Box::new(PromptLuksPassword::new(self.part_id).with_pop_count(1)));
+                      return Signal::Push(Box::new(
+                        PromptLuksPassword::new(self.part_id).with_pop_count(1),
+                      ));
                     }
                   }
                   Signal::Wait
                 }
                 5 => Signal::Push(Box::new(SelectFilesystem::new(Some(self.part_id)))), // Change FS
                 6 => Signal::Push(Box::new(SetLabel::new(self.part_id))),
-                7 => { // Unmark
+                7 => {
+                  // Unmark
                   if let Some(p) = device.partition_by_id_mut(self.part_id) {
                     p.set_status(PartStatus::Exists);
                   }
                   self.refresh_menu_from_device(device);
                   Signal::Wait
                 }
-                8 => { // Delete
+                8 => {
+                  // Delete
                   if let Some(p) = device.partition_by_id_mut(self.part_id) {
                     p.set_status(PartStatus::Delete);
                     device.calculate_free_space();
@@ -2135,19 +2387,23 @@ impl Page for AlterPartition {
           PartStatus::Create => {
             if self.is_swap {
               match idx {
-                0 => { // Encrypt
+                0 => {
+                  // Encrypt
                   self.toggle_current_checkbox(device);
                   if let Some(p) = device.partition_by_id_mut(self.part_id) {
                     let now_enc = p.flags().iter().any(|f| f == "encrypt");
                     if now_enc {
-                      return Signal::Push(Box::new(PromptLuksPassword::new(self.part_id).with_pop_count(1)));
+                      return Signal::Push(Box::new(
+                        PromptLuksPassword::new(self.part_id).with_pop_count(1),
+                      ));
                     }
                   }
                   Signal::Wait
                 }
                 1 => Signal::Push(Box::new(SelectFilesystem::new(Some(self.part_id)))), // Change FS
                 2 => Signal::Push(Box::new(SetLabel::new(self.part_id))),
-                3 => { // Delete (remove from layout)
+                3 => {
+                  // Delete (remove from layout)
                   if let Some(p) = device.partition_by_id_mut(self.part_id) {
                     p.set_status(PartStatus::Delete);
                   }
@@ -2162,19 +2418,23 @@ impl Page for AlterPartition {
             } else {
               match idx {
                 0 => Signal::Push(Box::new(SetMountPoint::new(self.part_id))),
-                1..=4 => { // checkboxes
+                1..=4 => {
+                  // checkboxes
                   self.toggle_current_checkbox(device);
                   if let Some(p) = device.partition_by_id_mut(self.part_id) {
                     let now_enc = p.flags().iter().any(|f| f == "encrypt");
                     if now_enc {
-                      return Signal::Push(Box::new(PromptLuksPassword::new(self.part_id).with_pop_count(1)));
+                      return Signal::Push(Box::new(
+                        PromptLuksPassword::new(self.part_id).with_pop_count(1),
+                      ));
                     }
                   }
                   Signal::Wait
                 }
                 5 => Signal::Push(Box::new(SelectFilesystem::new(Some(self.part_id)))), // Change FS
                 6 => Signal::Push(Box::new(SetLabel::new(self.part_id))),
-                7 => { // Delete (remove from layout)
+                7 => {
+                  // Delete (remove from layout)
                   if let Some(p) = device.partition_by_id_mut(self.part_id) {
                     p.set_status(PartStatus::Delete);
                   }
@@ -2198,11 +2458,11 @@ impl Page for AlterPartition {
 }
 
 fn validate_passphrase(p: &str) -> Result<(), &'static str> {
-    if p.trim().len() < 8 {
-        Err("Passphrase must be at least 8 characters.")
-    } else {
-        Ok(())
-    }
+  if p.trim().len() < 8 {
+    Err("Passphrase must be at least 8 characters.")
+  } else {
+    Ok(())
+  }
 }
 
 pub struct PromptLuksPassword {
@@ -2220,17 +2480,38 @@ impl PromptLuksPassword {
     let pass_confirm = LineEditor::new("Confirm LUKS Passphrase", None::<&str>).secret(true);
 
     let help_content = styled_block(vec![
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "Tab"), (None, " - Next field")],
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "Shift+Tab"), (None, " - Previous field")],
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "Enter"), (None, " - Continue / Confirm")],
-      vec![(Some((Color::Yellow, Modifier::BOLD)), "Esc"), (None, " - Cancel")],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Tab"),
+        (None, " - Next field"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Shift+Tab"),
+        (None, " - Previous field"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
+        (None, " - Continue / Confirm"),
+      ],
+      vec![
+        (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
+        (None, " - Cancel"),
+      ],
       vec![(None, "")],
       vec![(None, "Enter and confirm the LUKS passphrase.")],
-      vec![(None, "It is stored in a root-only file in RAM and deleted once the partition is opened.")],
+      vec![(
+        None,
+        "It is stored in a root-only file in RAM and deleted once the partition is opened.",
+      )],
     ]);
     let help_modal = HelpModal::new("LUKS Passphrase", help_content);
 
-    Self { dev_id, pass_input, pass_confirm, help_modal, pop_count_on_success: 1 }
+    Self {
+      dev_id,
+      pass_input,
+      pass_confirm,
+      help_modal,
+      pop_count_on_success: 1,
+    }
   }
 
   pub fn with_pop_count(mut self, n: usize) -> Self {
@@ -2241,7 +2522,9 @@ impl PromptLuksPassword {
   fn cycle_forward(&mut self) {
     if self.pass_input.is_focused() {
       // use the shared validator before moving on
-      let v = self.pass_input.get_value()
+      let v = self
+        .pass_input
+        .get_value()
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .unwrap_or_default();
       if let Err(msg) = validate_passphrase(&v) {
@@ -2275,16 +2558,24 @@ impl PromptLuksPassword {
 
 impl Page for PromptLuksPassword {
   fn render(&mut self, _installer: &mut Installer, f: &mut Frame, area: Rect) {
-    let hor = split_hor!(area, 1, [
-      Constraint::Percentage(20),
-      Constraint::Percentage(60),
-      Constraint::Percentage(20),
-    ]);
-    let col = split_vert!(hor[1], 1, [
-      Constraint::Length(5), // pass
-      Constraint::Length(5), // confirm
-      Constraint::Min(0),
-    ]);
+    let hor = split_hor!(
+      area,
+      1,
+      [
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+      ]
+    );
+    let col = split_vert!(
+      hor[1],
+      1,
+      [
+        Constraint::Length(5), // pass
+        Constraint::Length(5), // confirm
+        Constraint::Min(0),
+      ]
+    );
 
     self.pass_input.render(f, col[0]);
     self.pass_confirm.render(f, col[1]);
@@ -2294,19 +2585,33 @@ impl Page for PromptLuksPassword {
 
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => { self.help_modal.toggle(); return Signal::Wait; }
-      ui_close!() if self.help_modal.visible => { self.help_modal.hide(); return Signal::Wait; }
+      KeyCode::Char('?') => {
+        self.help_modal.toggle();
+        return Signal::Wait;
+      }
+      ui_close!() if self.help_modal.visible => {
+        self.help_modal.hide();
+        return Signal::Wait;
+      }
       _ if self.help_modal.visible => return Signal::Wait,
       KeyCode::Esc => return Signal::Pop,
-      KeyCode::Tab => { self.cycle_forward(); return Signal::Wait; }
-      KeyCode::BackTab => { self.cycle_backward(); return Signal::Wait; }
+      KeyCode::Tab => {
+        self.cycle_forward();
+        return Signal::Wait;
+      }
+      KeyCode::BackTab => {
+        self.cycle_backward();
+        return Signal::Wait;
+      }
       _ => {}
     }
 
     if self.pass_input.is_focused() {
       match event.code {
         KeyCode::Enter => {
-          let v = self.pass_input.get_value()
+          let v = self
+            .pass_input
+            .get_value()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
           if let Err(msg) = validate_passphrase(&v) {
@@ -2323,10 +2628,14 @@ impl Page for PromptLuksPassword {
     } else if self.pass_confirm.is_focused() {
       match event.code {
         KeyCode::Enter => {
-          let pass = self.pass_input.get_value()
+          let pass = self
+            .pass_input
+            .get_value()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
-          let confirm = self.pass_confirm.get_value()
+          let confirm = self
+            .pass_confirm
+            .get_value()
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .unwrap_or_default();
 
@@ -2367,7 +2676,6 @@ impl Page for PromptLuksPassword {
       Signal::Wait
     }
   }
-
 }
 
 struct AskEncryptRoot {
@@ -2384,22 +2692,64 @@ impl AskEncryptRoot {
       Box::new(Button::new("Back")) as Box<dyn ConfigWidget>,
     ]);
     buttons.focus();
-    let help = HelpModal::new("Encrypt ROOT", crate::styled_block(vec![
-      vec![(Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)), "↑/↓"), (None, " navigate")],
-      vec![(Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)), "Space"), (None, " toggle")],
-      vec![(Some((ratatui::style::Color::Yellow, ratatui::style::Modifier::BOLD)), "Enter"), (None, " continue")],
-    ]));
-    Self { root_id, buttons, help }
+    let help = HelpModal::new(
+      "Encrypt ROOT",
+      crate::styled_block(vec![
+        vec![
+          (
+            Some((
+              ratatui::style::Color::Yellow,
+              ratatui::style::Modifier::BOLD,
+            )),
+            "↑/↓",
+          ),
+          (None, " navigate"),
+        ],
+        vec![
+          (
+            Some((
+              ratatui::style::Color::Yellow,
+              ratatui::style::Modifier::BOLD,
+            )),
+            "Space",
+          ),
+          (None, " toggle"),
+        ],
+        vec![
+          (
+            Some((
+              ratatui::style::Color::Yellow,
+              ratatui::style::Modifier::BOLD,
+            )),
+            "Enter",
+          ),
+          (None, " continue"),
+        ],
+      ]),
+    );
+    Self {
+      root_id,
+      buttons,
+      help,
+    }
   }
 }
 
 impl Page for AskEncryptRoot {
   fn render(&mut self, _installer: &mut Installer, f: &mut Frame, area: Rect) {
-    let chunks = split_vert!(area, 1, [Constraint::Percentage(65), Constraint::Percentage(35)]);
+    let chunks = split_vert!(
+      area,
+      1,
+      [Constraint::Percentage(65), Constraint::Percentage(35)]
+    );
     let info = InfoBox::new(
       "Encrypt ROOT?",
       styled_block(vec![
-        vec![(None, "Optionally enable LUKS on the "), (Some((Color::Green, Modifier::BOLD)), "root"), (None, " partition only.")],
+        vec![
+          (None, "Optionally enable LUKS on the "),
+          (Some((Color::Green, Modifier::BOLD)), "root"),
+          (None, " partition only."),
+        ],
         vec![(None, "Boot/ESP remain unencrypted.")],
       ]),
     );
@@ -2411,24 +2761,42 @@ impl Page for AskEncryptRoot {
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     use KeyCode::*;
     match event.code {
-      KeyCode::Char('?') => { self.help.toggle(); Signal::Wait}
-      ui_up!() => { self.buttons.prev_child(); Signal::Wait}
-      ui_down!() => { self.buttons.next_child(); Signal::Wait}
-      Char(' ') => { if let Some(w) = self.buttons.focused_child_mut() { w.interact(); } Signal::Wait}
+      KeyCode::Char('?') => {
+        self.help.toggle();
+        Signal::Wait
+      }
+      ui_up!() => {
+        self.buttons.prev_child();
+        Signal::Wait
+      }
+      ui_down!() => {
+        self.buttons.next_child();
+        Signal::Wait
+      }
+      Char(' ') => {
+        if let Some(w) = self.buttons.focused_child_mut() {
+          w.interact();
+        }
+        Signal::Wait
+      }
       Esc => Signal::Pop,
       Enter => {
         match self.buttons.selected_child() {
-          Some(0) => { // toggle via Enter
-            if let Some(w) = self.buttons.focused_child_mut() { w.interact(); }
+          Some(0) => {
+            // toggle via Enter
+            if let Some(w) = self.buttons.focused_child_mut() {
+              w.interact();
+            }
             Signal::Wait
           }
           Some(1) => {
-            let encrypt = self.buttons
+            let encrypt = self
+              .buttons
               .get_value()
               .and_then(|v| v.get("widget_0").and_then(|b| b.as_bool()))
               .unwrap_or(false);
 
-            if !encrypt { 
+            if !encrypt {
               // finalize summary now (no encryption) and go back to Installer
               installer.make_drive_config_display();
               return Signal::PopCount(5);
@@ -2438,38 +2806,39 @@ impl Page for AskEncryptRoot {
             if !is_uefi() {
               // Fallback: keep existing flow if not UEFI
               if let Some(cfg) = installer.drive_config.as_mut()
-                && let Some(p) = cfg.partition_by_id_mut(self.root_id) {
-                  p.add_flag("encrypt");
-                    }
-                    return Signal::Push(Box::new(
-                      PromptLuksPassword::new(self.root_id).with_pop_count(6)
-                    ));
-                  }
-              
-                  // We’re UEFI: rebuild layout to include ESP + /boot + encrypted ROOT (+ optional swap)
-                  let (root_fs, swap_gb_opt) = {
-                    let cfg = match installer.drive_config.as_ref() {
-                      Some(c) => c,
-                      None => return Signal::Error(anyhow::anyhow!("No drive config available")),
-                    };
-                
-                    // Get FS from current ROOT (chosen earlier in SelectFilesystem)
-                    let root_fs = cfg
-                      .partitions()
-                      .find(|p| p.mount_point() == Some("/"))
-                      .and_then(|p| p.fs_type().map(|s| s.to_string()));
-                
-                    // Derive swap size (GiB) from any swap partition that exists in the temp layout
-                    let swap_gb_opt = cfg
-                      .partitions()
-                      .find(|p| p.fs_type() == Some("swap"))
-                      .map(|p| {
-                        let bytes = p.size_bytes(cfg.sector_size());
-                        // floor to GiB so it matches the “1/2/4/8 GB” choices
-                        (bytes / (1024 * 1024 * 1024)) as u64
-                      })
-                      .filter(|&g| g > 0);
-                  
+                && let Some(p) = cfg.partition_by_id_mut(self.root_id)
+              {
+                p.add_flag("encrypt");
+              }
+              return Signal::Push(Box::new(
+                PromptLuksPassword::new(self.root_id).with_pop_count(6),
+              ));
+            }
+
+            // We’re UEFI: rebuild layout to include ESP + /boot + encrypted ROOT (+ optional swap)
+            let (root_fs, swap_gb_opt) = {
+              let cfg = match installer.drive_config.as_ref() {
+                Some(c) => c,
+                None => return Signal::Error(anyhow::anyhow!("No drive config available")),
+              };
+
+              // Get FS from current ROOT (chosen earlier in SelectFilesystem)
+              let root_fs = cfg
+                .partitions()
+                .find(|p| p.mount_point() == Some("/"))
+                .and_then(|p| p.fs_type().map(|s| s.to_string()));
+
+              // Derive swap size (GiB) from any swap partition that exists in the temp layout
+              let swap_gb_opt = cfg
+                .partitions()
+                .find(|p| p.fs_type() == Some("swap"))
+                .map(|p| {
+                  let bytes = p.size_bytes(cfg.sector_size());
+                  // floor to GiB so it matches the “1/2/4/8 GB” choices
+                  (bytes / (1024 * 1024 * 1024)) as u64
+                })
+                .filter(|&g| g > 0);
+
               (root_fs, swap_gb_opt)
             };
 
@@ -2478,24 +2847,24 @@ impl Page for AskEncryptRoot {
               cfg.use_uefi_encrypted_root_layout_with_swap(
                 root_fs.or(Some("ext4".into())), // fallback if somehow missing
                 swap_gb_opt,
-                None,  // /boot default 1 GiB
-                None,  // ESP  default 512 MiB
+                None, // /boot default 1 GiB
+                None, // ESP  default 512 MiB
               );
               cfg.assign_device_numbers();
             }
-          
+
             // Find the new ROOT id (layout changed)
-            let new_root_id = installer
-              .drive_config
-              .as_ref()
-              .and_then(|cfg| cfg.partitions().find(|p| p.mount_point() == Some("/")).map(|p| p.id()));
-          
+            let new_root_id = installer.drive_config.as_ref().and_then(|cfg| {
+              cfg
+                .partitions()
+                .find(|p| p.mount_point() == Some("/"))
+                .map(|p| p.id())
+            });
+
             match new_root_id {
               Some(id) => {
                 // continue to passphrase prompt
-                Signal::Push(Box::new(
-                  PromptLuksPassword::new(id).with_pop_count(6)
-                ))
+                Signal::Push(Box::new(PromptLuksPassword::new(id).with_pop_count(6)))
               }
               None => Signal::Error(anyhow::anyhow!("Rebuilt layout has no ROOT (/) partition")),
             }
@@ -2619,8 +2988,8 @@ impl Page for SetMountPoint {
           match mount_point.as_str() {
             "/efi" => part.set_label("ESP"),
             "/boot" => part.set_label("XBOOTLDR"),
-            "/"     => part.set_label("ROOT"),
-            _       => {}
+            "/" => part.set_label("ROOT"),
+            _ => {}
           }
         }
         Signal::Pop

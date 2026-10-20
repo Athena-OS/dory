@@ -1,10 +1,14 @@
-use std::{collections::{BTreeSet, HashSet}, process::Command, sync::atomic::AtomicU64};
+use crate::widget::TableWidget;
 use log::debug;
 use ratatui::layout::Constraint;
 use serde::{Deserialize, Serialize};
-use serde_json::{from_slice, json, Value};
+use serde_json::{Value, from_slice, json};
 use shared::partition::is_uefi;
-use crate::widget::TableWidget;
+use std::{
+  collections::{BTreeSet, HashSet},
+  process::Command,
+  sync::atomic::AtomicU64,
+};
 
 static NEXT_PART_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -85,31 +89,31 @@ pub fn bytes_readable(bytes: u64) -> String {
 }
 
 pub fn bytes_readable_floor(bytes: u128) -> String {
-    const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
+  const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
 
-    let mut unit_idx = 0usize;
-    let mut denom: u128 = 1; // 1024^unit_idx
+  let mut unit_idx = 0usize;
+  let mut denom: u128 = 1; // 1024^unit_idx
 
-    while unit_idx + 1 < UNITS.len() && bytes >= denom * 1024 {
-        unit_idx += 1;
-        denom *= 1024;
-    }
+  while unit_idx + 1 < UNITS.len() && bytes >= denom * 1024 {
+    unit_idx += 1;
+    denom *= 1024;
+  }
 
-    // scaled_hundred = floor(bytes / denom * 100)
-    let scaled_hundred = bytes.saturating_mul(100) / denom;
-    let int_part = scaled_hundred / 100;
-    let frac_part = (scaled_hundred % 100) as u32;
+  // scaled_hundred = floor(bytes / denom * 100)
+  let scaled_hundred = bytes.saturating_mul(100) / denom;
+  let int_part = scaled_hundred / 100;
+  let frac_part = (scaled_hundred % 100) as u32;
 
-    if unit_idx == 0 {
-        // For raw bytes, no fractional part
-        format!("{} {}", int_part, UNITS[unit_idx])
-    } else if frac_part == 0 {
-        // Optional: drop .00 if you prefer
-        format!("{} {}", int_part, UNITS[unit_idx])
-    } else {
-        // Always two digits after the decimal, floored
-        format!("{}.{:02} {}", int_part, frac_part, UNITS[unit_idx])
-    }
+  if unit_idx == 0 {
+    // For raw bytes, no fractional part
+    format!("{} {}", int_part, UNITS[unit_idx])
+  } else if frac_part == 0 {
+    // Optional: drop .00 if you prefer
+    format!("{} {}", int_part, UNITS[unit_idx])
+  } else {
+    // Always two digits after the decimal, floored
+    format!("{}.{:02} {}", int_part, frac_part, UNITS[unit_idx])
+  }
 }
 
 /// Parse human-readable size strings into sector counts
@@ -189,10 +193,11 @@ pub fn lsblk() -> anyhow::Result<Vec<Disk>> {
   fn is_safe_device(dev: &Value) -> bool {
     // Check if this device is mounted at critical mount points
     if let Some(mount) = dev.get("mountpoint").and_then(|m| m.as_str())
-      && (mount == "/" || mount == "/iso") {
-        // "/" is the root filesystem, "/iso" is common in live environments
-        return false;
-      }
+      && (mount == "/" || mount == "/iso")
+    {
+      // "/" is the root filesystem, "/iso" is common in live environments
+      return false;
+    }
 
     // Recursively check all child partitions
     if let Some(children) = dev.get("children").and_then(|c| c.as_array()) {
@@ -244,7 +249,7 @@ pub fn lsblk() -> anyhow::Result<Vec<Disk>> {
       .get("type")
       .and_then(|v| v.as_str())
       .ok_or_else(|| anyhow::anyhow!("Device entry missing TYPE"))?;
-  
+
     // Only process devices of type "disk" (physical drives)
     if dev_type == "disk" {
       // NEW: whitelist physical disk name patterns to exclude zram/loop/ram/sr/dm/md...
@@ -252,11 +257,11 @@ pub fn lsblk() -> anyhow::Result<Vec<Disk>> {
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("Device entry missing NAME"))?;
-    
+
       if !is_physical_disk_name(dev_name) {
         continue;
       }
-    
+
       let disk = parse_disk(device.clone())?;
       disks.push(disk);
     }
@@ -328,15 +333,27 @@ pub fn parse_partition_with_log(part: &Value, logical_sector: u64) -> anyhow::Re
 
   let size_sectors = size_bytes / logical_sector; // exact for GPT partitions
 
-  let name = obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
-  let fs_type = obj.get("fstype").and_then(|v| v.as_str()).map(|s| s.to_string());
-  let mount_point = obj.get("mountpoint").and_then(|v| v.as_str()).map(|s| s.to_string());
-  let label = obj.get("label").and_then(|v| v.as_str()).map(|s| s.to_string());
+  let name = obj
+    .get("name")
+    .and_then(|v| v.as_str())
+    .map(|s| s.to_string());
+  let fs_type = obj
+    .get("fstype")
+    .and_then(|v| v.as_str())
+    .map(|s| s.to_string());
+  let mount_point = obj
+    .get("mountpoint")
+    .and_then(|v| v.as_str())
+    .map(|s| s.to_string());
+  let label = obj
+    .get("label")
+    .and_then(|v| v.as_str())
+    .map(|s| s.to_string());
 
   Ok(DiskItem::Partition(Partition::new(
     start,
     size_sectors,
-    logical_sector,           // << store logical sector size here too
+    logical_sector, // << store logical sector size here too
     PartStatus::Exists,
     name,
     fs_type,
@@ -391,12 +408,15 @@ impl DiskLabel {
     }
   }
   fn as_str(&self) -> &'static str {
-    match self { DiskLabel::Gpt => "gpt", DiskLabel::Msdos => "msdos", DiskLabel::None => "none" }
+    match self {
+      DiskLabel::Gpt => "gpt",
+      DiskLabel::Msdos => "msdos",
+      DiskLabel::None => "none",
+    }
   }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Default)]
 pub enum PartitioningMode {
   #[serde(rename = "auto")]
   Auto,
@@ -404,7 +424,6 @@ pub enum PartitioningMode {
   #[default]
   Manual,
 }
-
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 /// Represents a physical disk drive and its partition layout
@@ -429,7 +448,13 @@ pub struct Disk {
 }
 
 impl Disk {
-  pub fn new(name: String, size: u64, sector_size: u64, layout: Vec<DiskItem>, label: DiskLabel) -> Self {
+  pub fn new(
+    name: String,
+    size: u64,
+    sector_size: u64,
+    layout: Vec<DiskItem>,
+    label: DiskLabel,
+  ) -> Self {
     let mut new = Self {
       name,
       size,
@@ -443,7 +468,9 @@ impl Disk {
     new
   }
 
-  pub fn set_mode(&mut self, mode: PartitioningMode) { self.mode = mode; }
+  pub fn set_mode(&mut self, mode: PartitioningMode) {
+    self.mode = mode;
+  }
 
   /// Get info as a table row, based on the given field names (`headers`)
   pub fn as_table_row(&self, headers: &[DiskTableHeader]) -> Vec<String> {
@@ -489,7 +516,10 @@ impl Disk {
         };
 
         // Only include items we will actually touch
-        if !matches!(p.status(), PartStatus::Create | PartStatus::Modify | PartStatus::Delete) {
+        if !matches!(
+          p.status(),
+          PartStatus::Create | PartStatus::Modify | PartStatus::Delete
+        ) {
           continue;
         }
 
@@ -500,28 +530,28 @@ impl Disk {
         //  .unwrap_or_else(|| format!("part{}", p.id()));
 
         // Compute common fields/defaults
-        let is_esp    = p.flags().contains(&"esp".to_string());
+        let is_esp = p.flags().contains(&"esp".to_string());
 
-        let dev_path   = p.name().map(|k| format!("/dev/{k}")); // null if unknown
-        let format_opt = p.disko_fs_type();                       // null if unknown
-        let mount_opt  = p.mount_point();                         // null if not set
-        let label_opt  = p.label();                               // null if not set
-        let flags_vec  = p.flags().to_vec();                      // always present (maybe empty)
+        let dev_path = p.name().map(|k| format!("/dev/{k}")); // null if unknown
+        let format_opt = p.disko_fs_type(); // null if unknown
+        let mount_opt = p.mount_point(); // null if not set
+        let label_opt = p.label(); // null if not set
+        let flags_vec = p.flags().to_vec(); // always present (maybe empty)
 
         // Human size string (needed for create/modify; fine if present on delete)
         let size_str = bytes_disko_cfg(
-            p.size_bytes(p.sector_size),
-            total_used_sectors,
-            p.sector_size,
-            usable_total,
+          p.size_bytes(p.sector_size),
+          total_used_sectors,
+          p.sector_size,
+          usable_total,
         );
 
         // "type": GPT code for ESP, otherwise "filesystem"
         let part_type = if disk_is_gpt {
-            p.fs_gpt_code(is_esp).unwrap_or("filesystem").to_string()
+          p.fs_gpt_code(is_esp).unwrap_or("filesystem").to_string()
         } else {
-            // MBR/msdos: don't emit GPT type codes
-            "filesystem".to_string()
+          // MBR/msdos: don't emit GPT type codes
+          "filesystem".to_string()
         };
 
         // Build a stable partition object: every key always present
@@ -561,29 +591,42 @@ impl Disk {
   }
   pub fn assign_device_numbers(&mut self) {
     fn needs_p(b: &str) -> bool {
-      b.chars().last().map(|c| c.is_ascii_digit()).unwrap_or(false)
+      b.chars()
+        .last()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
     }
     fn parse_partnum(n: &str) -> Option<u32> {
       let tail: String = n.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
-      if tail.is_empty() { return None; }
+      if tail.is_empty() {
+        return None;
+      }
       tail.chars().rev().collect::<String>().parse::<u32>().ok()
     }
     fn next_free(used: &mut BTreeSet<u32>) -> u32 {
       let mut n = 1;
-      loop { if used.insert(n) { return n; } n += 1; }
+      loop {
+        if used.insert(n) {
+          return n;
+        }
+        n += 1;
+      }
     }
 
     let sep = if needs_p(&self.name) { "p" } else { "" };
 
     // numbers already in use by non-deleted parts that already have a kernel-style name
-    let mut used: BTreeSet<u32> = self.partitions()
+    let mut used: BTreeSet<u32> = self
+      .partitions()
       .filter(|p| *p.status() != PartStatus::Delete)
       .filter_map(|p| p.name().and_then(parse_partnum))
       .collect();
 
     for item in &mut self.layout {
       if let DiskItem::Partition(p) = item {
-        if *p.status() == PartStatus::Delete { continue; }
+        if *p.status() == PartStatus::Delete {
+          continue;
+        }
 
         if let Some(n) = p.name().and_then(parse_partnum) {
           used.insert(n);
@@ -698,9 +741,11 @@ impl Disk {
   /// 3. Adding FreeSpace entries for gaps larger than 5MB
   pub fn calculate_free_space(&mut self) {
     // Separate deleted partitions from the rest
-    let (deleted, mut rest) = std::mem::take(&mut self.layout).into_iter().partition::<Vec<_>, _>(
-      |item| matches!(item, DiskItem::Partition(p) if p.status == PartStatus::Delete),
-    );
+    let (deleted, mut rest) = std::mem::take(&mut self.layout)
+      .into_iter()
+      .partition::<Vec<_>, _>(
+        |item| matches!(item, DiskItem::Partition(p) if p.status == PartStatus::Delete),
+      );
 
     // <<< NEW: keep only real partitions in `rest`; drop any existing FreeSpace >>>
     rest.retain(|item| matches!(item, DiskItem::Partition(_)));
@@ -715,21 +760,31 @@ impl Disk {
     let mut cursor = one_mib_in_sectors(self.sector_size).min(last_usable);
 
     for item in rest.iter() {
-        let DiskItem::Partition(p) = item else { continue; };
-        if p.start() > cursor {
-            let size = p.start().saturating_sub(cursor);
-            if size > mb_to_sectors(5, self.sector_size) {
-                gaps.push(DiskItem::FreeSpace { id: get_entry_id(), start: cursor, size });
-            }
+      let DiskItem::Partition(p) = item else {
+        continue;
+      };
+      if p.start() > cursor {
+        let size = p.start().saturating_sub(cursor);
+        if size > mb_to_sectors(5, self.sector_size) {
+          gaps.push(DiskItem::FreeSpace {
+            id: get_entry_id(),
+            start: cursor,
+            size,
+          });
         }
-        cursor = p.start().saturating_add(p.size()).min(last_usable);
+      }
+      cursor = p.start().saturating_add(p.size()).min(last_usable);
     }
 
     if cursor < last_usable {
-        let size = last_usable - cursor;
-        if size > mb_to_sectors(5, self.sector_size) {
-            gaps.push(DiskItem::FreeSpace { id: get_entry_id(), start: cursor, size });
-        }
+      let size = last_usable - cursor;
+      if size > mb_to_sectors(5, self.sector_size) {
+        gaps.push(DiskItem::FreeSpace {
+          id: get_entry_id(),
+          start: cursor,
+          size,
+        });
+      }
     }
 
     // Merge partitions (rest) with fresh gaps (no old FreeSpace carried over)
@@ -769,7 +824,11 @@ impl Disk {
         DiskItem::Partition(_) => {
           // If we have accumulated free space, add it to the layout
           if let Some((start, size)) = last_free.take() {
-            new_new_layout.push(DiskItem::FreeSpace { id: get_entry_id(), start, size });
+            new_new_layout.push(DiskItem::FreeSpace {
+              id: get_entry_id(),
+              start,
+              size,
+            });
           }
           new_new_layout.push(item);
         }
@@ -789,25 +848,29 @@ impl Disk {
 
   #[inline]
   fn align_up(x: u64, align: u64) -> u64 {
-      if align == 0 { return x; }
-      x.div_ceil(align) * align
+    if align == 0 {
+      return x;
+    }
+    x.div_ceil(align) * align
   }
 
   #[inline]
   fn align_down(x: u64, align: u64) -> u64 {
-      if align == 0 { return x; }
-      (x / align) * align
+    if align == 0 {
+      return x;
+    }
+    (x / align) * align
   }
 
   fn gpt_tail_reserve(logical_sector: u64, entries: u64, entry_size: u64) -> u64 {
-      // 1 sector for the backup header + ceil(size of table / sector size)
-      let table_bytes = entries * entry_size; // typically 128 * 128 = 16384
-      1 + table_bytes.div_ceil(logical_sector)
+    // 1 sector for the backup header + ceil(size of table / sector size)
+    let table_bytes = entries * entry_size; // typically 128 * 128 = 16384
+    1 + table_bytes.div_ceil(logical_sector)
   }
 
   // reasonable defaults: 128 entries, 128-byte entries
   fn default_gpt_tail_reserve(logical_sector: u64) -> u64 {
-      Self::gpt_tail_reserve(logical_sector, 128, 128)
+    Self::gpt_tail_reserve(logical_sector, 128, 128)
   }
 
   /// Sectors at the end of the disk reserved for the backup GPT header/table.
@@ -857,32 +920,28 @@ impl Disk {
     let boot_size_aligned = Self::align_up(boot_size, align);
 
     let (boot_fs, boot_mp, boot_flags): (String, String, Vec<String>) = match disk_label {
-        // In UEFI + Msdos, in autopartitioning mode the partition table will be converted to GPT, so we need to still set ESP/EFI
-        DiskLabel::Gpt | DiskLabel::Msdos if is_uefi() => (
-            "fat32".into(),           // ESP filesystem
-            "/efi".into(),       // ESP mountpoint
-            vec!["boot".into(), "esp".into()], // mark as ESP
-        ),
-        DiskLabel::Gpt => (
-            "fat32".into(),            // classic /boot on MBR
-            "/boot".into(),           // mountpoint
-            vec!["bls_boot".into()],      // only "bls_boot" flag
-        ),
-        DiskLabel::Msdos => (
-            "fat32".into(),            // classic /boot on MBR
-            "/boot".into(),           // mountpoint
-            vec!["boot".into()],      // only "boot" flag
-        ),
-        DiskLabel::None if is_uefi() => (
-            "fat32".into(),
-            "/efi".into(),
-            vec!["boot".into(), "esp".into()],
-        ),
-        DiskLabel::None => (
-            "fat32".into(),
-            "/boot".into(),
-            vec!["boot".into()],
-        ),
+      // In UEFI + Msdos, in autopartitioning mode the partition table will be converted to GPT, so we need to still set ESP/EFI
+      DiskLabel::Gpt | DiskLabel::Msdos if is_uefi() => (
+        "fat32".into(),                    // ESP filesystem
+        "/efi".into(),                     // ESP mountpoint
+        vec!["boot".into(), "esp".into()], // mark as ESP
+      ),
+      DiskLabel::Gpt => (
+        "fat32".into(),          // classic /boot on MBR
+        "/boot".into(),          // mountpoint
+        vec!["bls_boot".into()], // only "bls_boot" flag
+      ),
+      DiskLabel::Msdos => (
+        "fat32".into(),      // classic /boot on MBR
+        "/boot".into(),      // mountpoint
+        vec!["boot".into()], // only "boot" flag
+      ),
+      DiskLabel::None if is_uefi() => (
+        "fat32".into(),
+        "/efi".into(),
+        vec!["boot".into(), "esp".into()],
+      ),
+      DiskLabel::None => ("fat32".into(), "/boot".into(), vec!["boot".into()]),
     };
 
     // This serves as the EFI System Partition (ESP)
@@ -894,7 +953,7 @@ impl Disk {
       None,
       Some(boot_fs),
       Some(boot_mp),
-      Some("ESP".into()),  // Partition label
+      Some("ESP".into()), // Partition label
       false,
       boot_flags,
     );
@@ -902,7 +961,9 @@ impl Disk {
     let boot_end = boot_part.end(); // end = start + size
 
     // Reserve space for swap at the end (if enabled and fits)
-    let mut swap_secs = swap_gb.map(|g| mb_to_sectors(g * 1024, self.sector_size)).unwrap_or(0);
+    let mut swap_secs = swap_gb
+      .map(|g| mb_to_sectors(g * 1024, self.sector_size))
+      .unwrap_or(0);
     // Optionally force swap size to be a multiple of `align`
     swap_secs = Self::align_down(swap_secs, align);
 
@@ -910,9 +971,9 @@ impl Disk {
     let root_start = Self::align_up(boot_end, align);
     // keep room for swap (already aligned down). Compute root_end limit and align it down
     let root_end_limit = if swap_secs > 0 && root_start + swap_secs < self.size - tail_reserve {
-        (self.size - tail_reserve) - swap_secs
+      (self.size - tail_reserve) - swap_secs
     } else {
-        self.size - tail_reserve
+      self.size - tail_reserve
     };
 
     // ensure the end we use is aligned so SWAP can start aligned
@@ -922,15 +983,15 @@ impl Disk {
     let mut root_size = root_end.saturating_sub(root_start);
     let final_swap_secs = if root_size == 0 { 0 } else { swap_secs };
     if final_swap_secs == 0 {
-        // no swap: use the whole tail, still aligned
-        let last_usable = self.size.saturating_sub(tail_reserve);
-        root_size = Self::align_down(last_usable.saturating_sub(root_start), align);
+      // no swap: use the whole tail, still aligned
+      let last_usable = self.size.saturating_sub(tail_reserve);
+      root_size = Self::align_down(last_usable.saturating_sub(root_start), align);
     }
 
     // Create root partition using all remaining space
     let root_part = Partition::new(
-      root_start,               // Start immediately after boot partition
-      root_size, // Use all remaining disk space
+      root_start, // Start immediately after boot partition
+      root_size,  // Use all remaining disk space
       self.sector_size,
       PartStatus::Create,
       None,
@@ -947,22 +1008,22 @@ impl Disk {
 
     // SWAP (if any)
     if final_swap_secs > 0 {
-        let swap_start = Self::align_up(root_start + root_size, align);
-        if swap_start + final_swap_secs <= self.size {
-            let swap_part = Partition::new(
-                swap_start,
-                final_swap_secs, // already aligned down
-                self.sector_size,
-                PartStatus::Create,
-                None,
-                Some("swap".into()),
-                None,                  // no mount point for swap
-                Some("SWAP".into()),
-                false,
-                vec![],                // (GPT type 8200 is implied by fs_gpt_code if you choose to emit it)
-            );
-            self.layout.push(DiskItem::Partition(swap_part));
-        }
+      let swap_start = Self::align_up(root_start + root_size, align);
+      if swap_start + final_swap_secs <= self.size {
+        let swap_part = Partition::new(
+          swap_start,
+          final_swap_secs, // already aligned down
+          self.sector_size,
+          PartStatus::Create,
+          None,
+          Some("swap".into()),
+          None, // no mount point for swap
+          Some("SWAP".into()),
+          false,
+          vec![], // (GPT type 8200 is implied by fs_gpt_code if you choose to emit it)
+        );
+        self.layout.push(DiskItem::Partition(swap_part));
+      }
     }
 
     self.calculate_free_space();
@@ -972,126 +1033,123 @@ impl Disk {
   /// UEFI-only best-effort layout when the user wants an **encrypted root**.
   /// Creates: ESP → /boot → ROOT(encrypt) → optional SWAP
   pub fn use_uefi_encrypted_root_layout_with_swap(
-      &mut self,
-      root_fs: Option<String>,      // fs INSIDE LUKS (e.g., "ext4", "btrfs")
-      swap_gb: Option<u64>,         // e.g., Some(8) for 8 GiB swap
-      boot_mb: Option<u64>,         // default 1024 MiB for /boot if None
-      esp_mb: Option<u64>,          // default 512 MiB for ESP if None
+    &mut self,
+    root_fs: Option<String>, // fs INSIDE LUKS (e.g., "ext4", "btrfs")
+    swap_gb: Option<u64>,    // e.g., Some(8) for 8 GiB swap
+    boot_mb: Option<u64>,    // default 1024 MiB for /boot if None
+    esp_mb: Option<u64>,     // default 512 MiB for ESP if None
   ) {
-      let align = 2048;
-      self.set_mode(PartitioningMode::Auto);
+    let align = 2048;
+    self.set_mode(PartitioningMode::Auto);
 
-      // We are handling UEFI only; keep GPT tail reserve behavior
-      let tail_reserve = self.tail_reserve();
-      // Clear any created items, keep existing for visibility but mark them Delete
-      self.layout.retain(|item| match item {
-          DiskItem::FreeSpace { .. } => false,
-          DiskItem::Partition(part) => part.status != PartStatus::Create,
-      });
-      for item in self.layout.iter_mut() {
-          if let DiskItem::Partition(p) = item {
-              p.set_status(PartStatus::Delete);
-          }
+    // We are handling UEFI only; keep GPT tail reserve behavior
+    let tail_reserve = self.tail_reserve();
+    // Clear any created items, keep existing for visibility but mark them Delete
+    self.layout.retain(|item| match item {
+      DiskItem::FreeSpace { .. } => false,
+      DiskItem::Partition(part) => part.status != PartStatus::Create,
+    });
+    for item in self.layout.iter_mut() {
+      if let DiskItem::Partition(p) = item {
+        p.set_status(PartStatus::Delete);
       }
-      // Start at 1 MiB, aligned
-      let mut cursor = Self::align_up(
-          one_mib_in_sectors(self.sector_size),
-          align,
-      );
-      // --- ESP (FAT32, /efi) ---
-      let esp_sz = Self::align_up(
-          mb_to_sectors(esp_mb.unwrap_or(512), self.sector_size),
-          align,
-      );
-      let esp = Partition::new(
-          cursor,
-          esp_sz,
+    }
+    // Start at 1 MiB, aligned
+    let mut cursor = Self::align_up(one_mib_in_sectors(self.sector_size), align);
+    // --- ESP (FAT32, /efi) ---
+    let esp_sz = Self::align_up(
+      mb_to_sectors(esp_mb.unwrap_or(512), self.sector_size),
+      align,
+    );
+    let esp = Partition::new(
+      cursor,
+      esp_sz,
+      self.sector_size,
+      PartStatus::Create,
+      None,
+      Some("fat32".into()),
+      Some("/efi".into()),
+      Some("ESP".into()),
+      false,
+      vec!["boot".into(), "esp".into()],
+    );
+    cursor = Self::align_up(esp.end(), align);
+    self.layout.push(DiskItem::Partition(esp));
+    // --- /boot (fat32, unencrypted) ---
+    let boot_sz = Self::align_up(
+      mb_to_sectors(boot_mb.unwrap_or(1024), self.sector_size),
+      align,
+    );
+    let boot = Partition::new(
+      cursor,
+      boot_sz,
+      self.sector_size,
+      PartStatus::Create,
+      None,
+      Some("fat32".into()),
+      Some("/boot".into()),
+      Some("XBOOTLDR".into()),
+      false,
+      vec!["bls_boot".into()],
+    );
+    cursor = Self::align_up(boot.end(), align);
+    self.layout.push(DiskItem::Partition(boot));
+    // --- Reserve for swap (optional, at the end) ---
+    let mut swap_secs = swap_gb
+      .map(|g| mb_to_sectors(g * 1024, self.sector_size))
+      .unwrap_or(0);
+    swap_secs = Self::align_down(swap_secs, align);
+    let last_usable = self.size.saturating_sub(tail_reserve);
+    // --- ROOT (encrypted) ---
+    let root_start = cursor;
+    let root_end_limit = if swap_secs > 0 && root_start + swap_secs < last_usable {
+      last_usable - swap_secs
+    } else {
+      last_usable
+    };
+    let root_end = Self::align_down(root_end_limit, align);
+    let mut root_size = root_end.saturating_sub(root_start);
+    if root_size == 0 {
+      // Not enough space when reserving swap; drop swap
+      swap_secs = 0;
+      let root_end_all = Self::align_down(last_usable, align);
+      root_size = root_end_all.saturating_sub(root_start);
+    }
+    let root = Partition::new(
+      root_start,
+      root_size,
+      self.sector_size,
+      PartStatus::Create,
+      None,
+      root_fs.clone(), // FS that will live inside LUKS
+      Some("/".into()),
+      Some("ROOT".into()),
+      false,
+      vec!["encrypt".into()], // <-- signal your pipeline to LUKS this partition
+    );
+    self.layout.push(DiskItem::Partition(root));
+    // --- SWAP (optional) ---
+    if swap_secs > 0 {
+      let swap_start = Self::align_up(root_end, align);
+      if swap_start + swap_secs <= self.size {
+        let swap_part = Partition::new(
+          swap_start,
+          swap_secs,
           self.sector_size,
           PartStatus::Create,
           None,
-          Some("fat32".into()),
-          Some("/efi".into()),
-          Some("ESP".into()),
-          false,
-          vec!["boot".into(), "esp".into()],
-      );
-      cursor = Self::align_up(esp.end(), align);
-      self.layout.push(DiskItem::Partition(esp));
-      // --- /boot (fat32, unencrypted) ---
-      let boot_sz = Self::align_up(
-          mb_to_sectors(boot_mb.unwrap_or(1024), self.sector_size),
-          align,
-      );
-      let boot = Partition::new(
-          cursor,
-          boot_sz,
-          self.sector_size,
-          PartStatus::Create,
+          Some("swap".into()),
           None,
-          Some("fat32".into()),
-          Some("/boot".into()),
-          Some("XBOOTLDR".into()),
+          Some("SWAP".into()),
           false,
-          vec!["bls_boot".into()],
-      );
-      cursor = Self::align_up(boot.end(), align);
-      self.layout.push(DiskItem::Partition(boot));
-      // --- Reserve for swap (optional, at the end) ---
-      let mut swap_secs = swap_gb
-          .map(|g| mb_to_sectors(g * 1024, self.sector_size))
-          .unwrap_or(0);
-      swap_secs = Self::align_down(swap_secs, align);
-      let last_usable = self.size.saturating_sub(tail_reserve);
-      // --- ROOT (encrypted) ---
-      let root_start = cursor;
-      let root_end_limit = if swap_secs > 0 && root_start + swap_secs < last_usable {
-          last_usable - swap_secs
-      } else {
-          last_usable
-      };
-      let root_end = Self::align_down(root_end_limit, align);
-      let mut root_size = root_end.saturating_sub(root_start);
-      if root_size == 0 {
-          // Not enough space when reserving swap; drop swap
-          swap_secs = 0;
-          let root_end_all = Self::align_down(last_usable, align);
-          root_size = root_end_all.saturating_sub(root_start);
+          vec![],
+        );
+        self.layout.push(DiskItem::Partition(swap_part));
       }
-      let root = Partition::new(
-          root_start,
-          root_size,
-          self.sector_size,
-          PartStatus::Create,
-          None,
-          root_fs.clone(),                 // FS that will live inside LUKS
-          Some("/".into()),
-          Some("ROOT".into()),
-          false,
-          vec!["encrypt".into()],          // <-- signal your pipeline to LUKS this partition
-      );
-      self.layout.push(DiskItem::Partition(root));
-      // --- SWAP (optional) ---
-      if swap_secs > 0 {
-          let swap_start = Self::align_up(root_end, align);
-          if swap_start + swap_secs <= self.size {
-              let swap_part = Partition::new(
-                  swap_start,
-                  swap_secs,
-                  self.sector_size,
-                  PartStatus::Create,
-                  None,
-                  Some("swap".into()),
-                  None,
-                  Some("SWAP".into()),
-                  false,
-                  vec![],
-              );
-              self.layout.push(DiskItem::Partition(swap_part));
-          }
-      }
-      self.calculate_free_space();
-      self.assign_device_numbers();
-  }  
+    }
+    self.calculate_free_space();
+    self.assign_device_numbers();
+  }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1128,7 +1186,11 @@ impl DiskItem {
                 PartStatus::Unknown => "unknown".into(),
               },
               DiskTableHeader::Device => {
-                if let Some(n) = p.name() { format!("/dev/{n}") } else { "".into() }
+                if let Some(n) = p.name() {
+                  format!("/dev/{n}")
+                } else {
+                  "".into()
+                }
               }
               DiskTableHeader::Label => p.label().unwrap_or("").into(),
               DiskTableHeader::Start => p.start().to_string(),
@@ -1269,7 +1331,9 @@ impl Partition {
       _ => None,
     }
   }
-  pub fn clear_mount_point(&mut self) { self.mount_point = None; }
+  pub fn clear_mount_point(&mut self) {
+    self.mount_point = None;
+  }
   pub fn fs_gpt_code(&self, is_esp: bool) -> Option<&'static str> {
     match self.fs_type.as_deref()? {
       "ext4" | "ext3" | "ext2" | "btrfs" | "xfs" => Some("8300"),

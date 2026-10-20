@@ -29,10 +29,11 @@ use tempfile::NamedTempFile;
 use crate::{
   drives::{Disk, DiskItem, part_table},
   installer::users::User,
-  split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_left, ui_right, ui_up,
+  split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_left, ui_right,
+  ui_up,
   widget::{
-    Button, ConfigWidget, FancyTicker, HelpModal, InfoBox, InstallSteps, LineEditor, LogBox, StrList,
-    WidgetBox, WidgetBoxBuilder,
+    Button, ConfigWidget, FancyTicker, HelpModal, InfoBox, InstallSteps, LineEditor, LogBox,
+    StrList, WidgetBox, WidgetBoxBuilder,
   },
 };
 
@@ -57,12 +58,16 @@ fn highlight_json(content: &str) -> String {
     .stdout(Stdio::piped())
     .stderr(Stdio::null())
     .spawn();
-  let Ok(mut child) = spawn else { return content.to_string() };
+  let Ok(mut child) = spawn else {
+    return content.to_string();
+  };
   if let Some(mut stdin) = child.stdin.take() {
     let _ = stdin.write_all(content.as_bytes());
   }
   match child.wait_with_output() {
-    Ok(out) if out.status.success() => String::from_utf8(out.stdout).unwrap_or_else(|_| content.to_string()),
+    Ok(out) if out.status.success() => {
+      String::from_utf8(out.stdout).unwrap_or_else(|_| content.to_string())
+    }
     _ => content.to_string(),
   }
 }
@@ -173,7 +178,9 @@ impl Installer {
   /// the backend process. The files contain password hashes, so they are
   /// created with 0600 (tempfile's default) and deleted when dropped.
   pub fn write_config_files(&mut self) -> anyhow::Result<(NamedTempFile, NamedTempFile)> {
-    let Value::Object(mut map) = self.build_config_json() else { unreachable!() };
+    let Value::Object(mut map) = self.build_config_json() else {
+      unreachable!()
+    };
     let system_v = map.remove("config").unwrap_or(Value::Null);
     let drives_v = map.remove("drives").unwrap_or(Value::Null);
 
@@ -237,12 +244,20 @@ pub trait Page {
 }
 
 /// Help-modal line: `key - description`.
-fn help_line(key: &'static str, what: &'static str) -> Vec<(Option<(Color, Modifier)>, &'static str)> {
+fn help_line(
+  key: &'static str,
+  what: &'static str,
+) -> Vec<(Option<(Color, Modifier)>, &'static str)> {
   vec![(KEY, key), (None, what)]
 }
 
 /// Common help modal for list pages.
-fn list_help(title: &str, noun: &'static str, blurb: &'static str, searchable: bool) -> HelpModal<'static> {
+fn list_help(
+  title: &str,
+  noun: &'static str,
+  blurb: &'static str,
+  searchable: bool,
+) -> HelpModal<'static> {
   let mut lines = vec![
     help_line("↑/↓, j/k", " - Navigate "),
     vec![(None, noun)],
@@ -263,7 +278,10 @@ fn list_help(title: &str, noun: &'static str, blurb: &'static str, searchable: b
 fn current_value_box(label: &str, value: &str) -> Option<Box<dyn ConfigWidget>> {
   Some(Box::new(InfoBox::new(
     "",
-    styled_block(vec![vec![(None, label.to_string())], vec![(HIGHLIGHT, value.to_string())]]),
+    styled_block(vec![
+      vec![(None, label.to_string())],
+      vec![(HIGHLIGHT, value.to_string())],
+    ]),
   )))
 }
 
@@ -331,7 +349,11 @@ impl MenuPages {
       MenuPages::KeyboardLayout => ListKind::KeyboardLayout.display_widget(installer),
       MenuPages::Locale => ListKind::Locale.display_widget(installer),
       MenuPages::Drives => {
-        let sector_size = installer.drive_config.as_ref().map(|d| d.sector_size()).unwrap_or(512);
+        let sector_size = installer
+          .drive_config
+          .as_ref()
+          .map(|d| d.sector_size())
+          .unwrap_or(512);
         installer
           .drive_config_display
           .as_deref()
@@ -357,9 +379,18 @@ impl MenuPages {
       MenuPages::Drives => (
         "Drives".to_string(),
         styled_block(vec![
-          vec![(None, "Select and configure the drives for your Athena OS installation.")],
-          vec![(None, "This includes partitioning, formatting, and mount points.")],
-          vec![(None, "If you have already configured a drive, its current configuration will be shown below.")],
+          vec![(
+            None,
+            "Select and configure the drives for your Athena OS installation.",
+          )],
+          vec![(
+            None,
+            "This includes partitioning, formatting, and mount points.",
+          )],
+          vec![(
+            None,
+            "If you have already configured a drive, its current configuration will be shown below.",
+          )],
         ]),
       ),
       MenuPages::Hostname => Hostname::page_info(),
@@ -383,7 +414,9 @@ impl MenuPages {
       MenuPages::Hostname => Box::new(Hostname::new()),
       MenuPages::RootPassword => Box::new(RootPassword::new()),
       MenuPages::UserAccounts => Box::new(UserAccounts::new(installer.users.clone())),
-      MenuPages::DesktopEnvironment => Box::new(ListPage::new(ListKind::DesktopEnvironment, installer)),
+      MenuPages::DesktopEnvironment => {
+        Box::new(ListPage::new(ListKind::DesktopEnvironment, installer))
+      }
       MenuPages::DisplayManager => Box::new(ListPage::new(ListKind::DisplayManager, installer)),
       MenuPages::Design => Box::new(ListPage::new(ListKind::Design, installer)),
       MenuPages::ExtraPackages => Box::new(ExtraPackages::new()),
@@ -421,7 +454,10 @@ impl Menu {
       help_line("q", " - Quit installer"),
       help_line("?", " - Show this help"),
       vec![(None, "")],
-      vec![(None, "Required options are shown in red when not configured.")],
+      vec![(
+        None,
+        "Required options are shown in red when not configured.",
+      )],
       vec![(None, "Configure all required options before proceeding.")],
     ]);
     let help_modal = HelpModal::new("Main Menu", help_content);
@@ -481,11 +517,24 @@ impl Menu {
     let missing = installer.missing_requirements();
     let mut lines: Vec<StyledLine> = Vec::new();
     if missing.is_empty() {
-      lines.push(vec![(Some((Color::Green, Modifier::BOLD)), "All required options have been configured!".into())]);
+      lines.push(vec![(
+        Some((Color::Green, Modifier::BOLD)),
+        "All required options have been configured!".into(),
+      )]);
     } else {
-      lines.push(vec![(None, "The following required options are not yet configured:".into())]);
-      lines.extend(missing.iter().map(|m| vec![(Some((Color::Red, Modifier::BOLD)), format!(" - {m}"))]));
-      lines.push(vec![(None, "Please configure them before proceeding.".into())]);
+      lines.push(vec![(
+        None,
+        "The following required options are not yet configured:".into(),
+      )]);
+      lines.extend(
+        missing
+          .iter()
+          .map(|m| vec![(Some((Color::Red, Modifier::BOLD)), format!(" - {m}"))]),
+      );
+      lines.push(vec![(
+        None,
+        "Please configure them before proceeding.".into(),
+      )]);
     }
 
     let mut info_box = InfoBox::new("Required Config", styled_block(lines));
@@ -696,7 +745,10 @@ impl ListKind {
 
   /// Long lists get a fuzzy search bar; short ones get an info box instead.
   fn searchable(self) -> bool {
-    matches!(self, ListKind::Timezone | ListKind::KeyboardLayout | ListKind::Locale)
+    matches!(
+      self,
+      ListKind::Timezone | ListKind::KeyboardLayout | ListKind::Locale
+    )
   }
 
   fn items(self, installer: &Installer) -> Vec<String> {
@@ -707,13 +759,41 @@ impl ListKind {
       ListKind::Locale => infos::LOCALES.to_vec(),
       ListKind::DesktopEnvironment => match installer.basesystem.as_deref() {
         Some("Athena Nix") => vec!["GNOME", "MATE", "Cinnamon", "None"],
-        _ => vec!["GNOME", "KDE Plasma", "Hyprland", "XFCE", "Cinnamon", "MATE", "Bspwm", "None"],
+        _ => vec![
+          "GNOME",
+          "KDE Plasma",
+          "Hyprland",
+          "XFCE",
+          "Cinnamon",
+          "MATE",
+          "Bspwm",
+          "None",
+        ],
       },
       ListKind::DisplayManager => vec![
-        "Ly", "Astronaut", "Black Hole", "Cyberpunk", "Cyborg", "Kath", "Jake The Dog", "Pixel Sakura",
-        "Post-Apocalypse", "Purple Leaves", "None",
+        "Ly",
+        "Astronaut",
+        "Black Hole",
+        "Cyberpunk",
+        "Cyborg",
+        "Kath",
+        "Jake The Dog",
+        "Pixel Sakura",
+        "Post-Apocalypse",
+        "Purple Leaves",
+        "None",
       ],
-      ListKind::Design => vec!["Cyborg", "Frost", "Graphite", "HackTheBox", "RedMoon", "Samurai", "Sweet", "Temple", "None"],
+      ListKind::Design => vec![
+        "Cyborg",
+        "Frost",
+        "Graphite",
+        "HackTheBox",
+        "RedMoon",
+        "Samurai",
+        "Sweet",
+        "Temple",
+        "None",
+      ],
     };
     strs.into_iter().map(str::to_string).collect()
   }
@@ -731,13 +811,41 @@ impl ListKind {
 
   fn help(self) -> HelpModal<'static> {
     let (title, noun, blurb) = match self {
-      ListKind::BaseSys => ("Base System", "base system options", "Select the base system for your environment."),
-      ListKind::Timezone => ("Timezone", "timezone options", "Select the timezone that matches your physical location."),
-      ListKind::KeyboardLayout => ("Keyboard Layout", "keyboard layout options", "Choose the keyboard layout that matches your physical keyboard."),
-      ListKind::Locale => ("Locale", "locale options", "Set the locale for your system, which determines language and regional settings."),
-      ListKind::DesktopEnvironment => ("Desktop Environment", "desktop environment options", "Select the desktop environment for your graphical interface."),
-      ListKind::DisplayManager => ("Display Manager", "display manager options", "Select the display manager for your graphical interface."),
-      ListKind::Design => ("Design", "design options", "Select the design for your graphical interface."),
+      ListKind::BaseSys => (
+        "Base System",
+        "base system options",
+        "Select the base system for your environment.",
+      ),
+      ListKind::Timezone => (
+        "Timezone",
+        "timezone options",
+        "Select the timezone that matches your physical location.",
+      ),
+      ListKind::KeyboardLayout => (
+        "Keyboard Layout",
+        "keyboard layout options",
+        "Choose the keyboard layout that matches your physical keyboard.",
+      ),
+      ListKind::Locale => (
+        "Locale",
+        "locale options",
+        "Set the locale for your system, which determines language and regional settings.",
+      ),
+      ListKind::DesktopEnvironment => (
+        "Desktop Environment",
+        "desktop environment options",
+        "Select the desktop environment for your graphical interface.",
+      ),
+      ListKind::DisplayManager => (
+        "Display Manager",
+        "display manager options",
+        "Select the display manager for your graphical interface.",
+      ),
+      ListKind::Design => (
+        "Design",
+        "design options",
+        "Select the design for your graphical interface.",
+      ),
     };
     list_help(title, noun, blurb, self.searchable())
   }
@@ -752,7 +860,10 @@ impl ListKind {
       }
       ListKind::Timezone => installer.timezone = value,
       ListKind::KeyboardLayout => {
-        installer.keyboard_layout = KEYMAPS.iter().find(|k| k.label == item).map(|k| k.id.to_string());
+        installer.keyboard_layout = KEYMAPS
+          .iter()
+          .find(|k| k.label == item)
+          .map(|k| k.id.to_string());
       }
       ListKind::Locale => installer.locale = value,
       ListKind::DesktopEnvironment => installer.desktop_environment = value,
@@ -768,11 +879,22 @@ impl ListKind {
       ListKind::KeyboardLayout => {
         let id = installer.keyboard_layout.as_deref()?;
         // try to resolve; fall back to the raw id if not found
-        ("Current keyboard layout set to:", resolve(id).map(|k| k.label.to_string()).unwrap_or_else(|| id.to_string()))
+        (
+          "Current keyboard layout set to:",
+          resolve(id)
+            .map(|k| k.label.to_string())
+            .unwrap_or_else(|| id.to_string()),
+        )
       }
       ListKind::Locale => ("Current locale set to:", installer.locale.clone()?),
-      ListKind::DesktopEnvironment => ("Current desktop environment set to:", installer.desktop_environment.clone()?),
-      ListKind::DisplayManager => ("Current display manager set to:", installer.display_manager.clone()?),
+      ListKind::DesktopEnvironment => (
+        "Current desktop environment set to:",
+        installer.desktop_environment.clone()?,
+      ),
+      ListKind::DisplayManager => (
+        "Current display manager set to:",
+        installer.display_manager.clone()?,
+      ),
       ListKind::Design => ("Current design set to:", installer.design.clone()?),
     };
     current_value_box(label, &value)
@@ -811,7 +933,13 @@ impl ListPage {
     } else {
       list.focus();
     }
-    Self { kind, list, search_bar, search_focused, help_modal: kind.help() }
+    Self {
+      kind,
+      list,
+      search_bar,
+      search_focused,
+      help_modal: kind.help(),
+    }
   }
 
   fn focus_list(&mut self) {
@@ -832,12 +960,27 @@ impl Page for ListPage {
       self.search_bar.render(f, chunks[0]);
       self.list.render(f, chunks[1]);
     } else {
-      let list_pct = if self.kind == ListKind::BaseSys { 30 } else { 50 };
-      let vert = split_vert!(area, 0, [Constraint::Percentage(list_pct), Constraint::Percentage(100 - list_pct)]);
+      let list_pct = if self.kind == ListKind::BaseSys {
+        30
+      } else {
+        50
+      };
+      let vert = split_vert!(
+        area,
+        0,
+        [
+          Constraint::Percentage(list_pct),
+          Constraint::Percentage(100 - list_pct)
+        ]
+      );
       let hor = split_hor!(
         vert[0],
         1,
-        [Constraint::Percentage(38), Constraint::Length(28), Constraint::Percentage(38)]
+        [
+          Constraint::Percentage(38),
+          Constraint::Length(28),
+          Constraint::Percentage(38)
+        ]
       );
       self.list.render(f, hor[1]);
       if let Some(info) = self.selected().and_then(|item| self.kind.info(&item)) {
@@ -1011,10 +1154,7 @@ fn design_page_info() -> (String, Vec<Line<'static>>) {
   (
     "Design".to_string(),
     styled_block(vec![
-      vec![(
-        None,
-        "Select the design to be installed on your system.",
-      )],
+      vec![(None, "Select the design to be installed on your system.")],
       vec![(
         None,
         "The design defines the visual style of your system, expressed through wallpapers, colors, and artistic themes that shape its overall atmosphere and aesthetic identity.",
@@ -1044,7 +1184,10 @@ impl Hostname {
       help_line("Backspace/Del", " - Delete characters"),
       help_line("?", " - Show this help"),
       vec![(None, "")],
-      vec![(None, "Set a unique hostname for your computer on the network.")],
+      vec![(
+        None,
+        "Set a unique hostname for your computer on the network.",
+      )],
     ]);
     let help_modal = HelpModal::new("Hostname", help_content);
     Self { input, help_modal }
@@ -1145,7 +1288,6 @@ impl Page for Hostname {
     self.input.render(f, hor_chunks[1]);
     self.help_modal.render(f, area);
   }
-
 
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
@@ -1328,7 +1470,6 @@ impl Page for RootPassword {
     self.help_modal.render(f, area);
   }
 
-
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
       KeyCode::Char('?') => {
@@ -1415,28 +1556,43 @@ enum LoadState {
 impl ExtraPackages {
   pub fn new() -> Self {
     // Empty picker; filled on first render (lazy init)
-    let picker = crate::widget::PackagePicker::new("Selected Packages", "Available Packages", &[], Vec::new());
+    let picker =
+      crate::widget::PackagePicker::new("Selected Packages", "Available Packages", &[], Vec::new());
     let help = HelpModal::new(
       "Extra Packages",
       styled_block(vec![
         vec![(None, "Select extra packages to install.")],
-        vec![(None, "Use '/' to search, Enter to add/remove, Tab to switch panes.")],
+        vec![(
+          None,
+          "Use '/' to search, Enter to add/remove, Tab to switch panes.",
+        )],
         vec![(None, "F5 to refresh package list (re-runs pacman -Sy).")],
         vec![(None, "Press Esc to go back and save your selection.")],
       ]),
     );
-    Self { picker, help, state: LoadState::Idle, rx: None }
+    Self {
+      picker,
+      help,
+      state: LoadState::Idle,
+      rx: None,
+    }
   }
 
   pub fn page_info() -> (String, Vec<Line<'static>>) {
     (
       "Extra Packages".to_string(),
-      styled_block(vec![vec![(None, "Pick additional packages to install alongside your base selection.")]]),
+      styled_block(vec![vec![(
+        None,
+        "Pick additional packages to install alongside your base selection.",
+      )]]),
     )
   }
 
   fn is_arch(installer: &Installer) -> bool {
-    installer.basesystem.as_deref().is_some_and(|s| s.to_lowercase().contains("arch"))
+    installer
+      .basesystem
+      .as_deref()
+      .is_some_and(|s| s.to_lowercase().contains("arch"))
   }
 
   pub fn display_widget(installer: &mut Installer) -> Option<Box<dyn ConfigWidget>> {
@@ -1446,7 +1602,10 @@ impl ExtraPackages {
     } else {
       "Not applicable to this base.".to_string()
     };
-    Some(Box::new(InfoBox::new("", styled_block(vec![vec![(None, text)]]))))
+    Some(Box::new(InfoBox::new(
+      "",
+      styled_block(vec![vec![(None, text)]]),
+    )))
   }
 
   fn kick_off_sync(&mut self, installer: &mut Installer) {
@@ -1468,7 +1627,10 @@ impl ExtraPackages {
         .status();
       let _ = tx.send(match status {
         Ok(st) if st.success() => Ok(()),
-        Ok(st) => Err(anyhow::anyhow!("pacman -Sy failed (exit {})", st.code().unwrap_or(-1))),
+        Ok(st) => Err(anyhow::anyhow!(
+          "pacman -Sy failed (exit {})",
+          st.code().unwrap_or(-1)
+        )),
         Err(e) => Err(anyhow::anyhow!("failed to exec pacman -Sy: {e}")),
       });
     });
@@ -1480,7 +1642,10 @@ impl ExtraPackages {
       None => {
         let out = Command::new("pacman").arg("-Slq").output()?;
         if !out.status.success() {
-          anyhow::bail!("pacman -Slq failed (exit {})", out.status.code().unwrap_or(-1));
+          anyhow::bail!(
+            "pacman -Slq failed (exit {})",
+            out.status.code().unwrap_or(-1)
+          );
         }
         let names: Vec<String> = String::from_utf8(out.stdout)?
           .lines()
@@ -1494,7 +1659,12 @@ impl ExtraPackages {
     };
     installer.repo_synced = true;
 
-    self.picker.set_package_manager(crate::widget::PackageManager::new(available, &installer.extra_packages));
+    self
+      .picker
+      .set_package_manager(crate::widget::PackageManager::new(
+        available,
+        &installer.extra_packages,
+      ));
     self.picker.focus_search();
     Ok(())
   }
@@ -1518,7 +1688,11 @@ impl Page for ExtraPackages {
     if !Self::is_arch(installer) {
       let p = Paragraph::new("This page is available if the selected Base System is Arch.")
         .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL).title("Extra Packages"));
+        .block(
+          Block::default()
+            .borders(Borders::ALL)
+            .title("Extra Packages"),
+        );
       f.render_widget(p, area);
       return;
     }
@@ -1540,14 +1714,24 @@ impl Page for ExtraPackages {
       LoadState::Idle | LoadState::Syncing => {
         let msg = Paragraph::new("Syncing package list with pacman -Sy...")
           .alignment(Alignment::Center)
-          .block(Block::default().borders(Borders::ALL).title("Extra Packages"));
+          .block(
+            Block::default()
+              .borders(Borders::ALL)
+              .title("Extra Packages"),
+          );
         f.render_widget(msg, area);
       }
       LoadState::Failed(err) => {
         let lines = styled_block(vec![
-          vec![(Some((Color::Red, Modifier::BOLD)), "Failed to prepare package list.".to_string())],
+          vec![(
+            Some((Color::Red, Modifier::BOLD)),
+            "Failed to prepare package list.".to_string(),
+          )],
           vec![(None, String::new())],
-          vec![(None, "You can run the following manually in the live system:".to_string())],
+          vec![(
+            None,
+            "You can run the following manually in the live system:".to_string(),
+          )],
           vec![(KEY, "  pacman -Sy".to_string())],
           vec![(None, String::new())],
           vec![(Some((Color::Indexed(245), Modifier::ITALIC)), err.clone())],
@@ -1555,7 +1739,11 @@ impl Page for ExtraPackages {
           vec![(None, "Press Esc to go back.".to_string())],
         ]);
         let p = Paragraph::new(lines)
-          .block(Block::default().borders(Borders::ALL).title("Extra Packages"))
+          .block(
+            Block::default()
+              .borders(Borders::ALL)
+              .title("Extra Packages"),
+          )
           .wrap(Wrap { trim: false });
         f.render_widget(p, area);
       }
@@ -1587,7 +1775,11 @@ impl Page for ExtraPackages {
     }
     // If not ready, only allow leaving the page
     if !matches!(self.state, LoadState::Ready) {
-      return if event.code == KeyCode::Esc { Signal::Pop } else { Signal::Wait };
+      return if event.code == KeyCode::Esc {
+        Signal::Pop
+      } else {
+        Signal::Wait
+      };
     }
     // Ready: on Esc store selection and go back
     if event.code == KeyCode::Esc {
@@ -1665,7 +1857,10 @@ impl ConfigPreview {
       help_line("Esc", " - Go back to menu"),
       help_line("?", " - Show this help"),
       vec![(None, "")],
-      vec![(None, "Review the generated Athena OS configuration before saving.")],
+      vec![(
+        None,
+        "Review the generated Athena OS configuration before saving.",
+      )],
     ]);
     let help_modal = HelpModal::new("Config Preview", help_content);
 
@@ -1757,7 +1952,6 @@ impl Page for ConfigPreview {
     self.help_modal.render(f, area);
   }
 
-
   fn handle_input(&mut self, _installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
       KeyCode::Char('?') => {
@@ -1810,11 +2004,11 @@ impl Page for ConfigPreview {
             self.button_row.first_child();
           }
         } else if self.current_view == ConfigView::System {
-            self.current_view = ConfigView::Partitioning;
-            self.scroll_position = 0;
+          self.current_view = ConfigView::Partitioning;
+          self.scroll_position = 0;
         } else if self.current_view == ConfigView::Partitioning {
-            self.current_view = ConfigView::System;
-            self.scroll_position = 0;
+          self.current_view = ConfigView::System;
+          self.scroll_position = 0;
         }
 
         Signal::Wait
@@ -1825,11 +2019,11 @@ impl Page for ConfigPreview {
             self.button_row.last_child();
           }
         } else if self.current_view == ConfigView::Partitioning {
-            self.current_view = ConfigView::System;
-            self.scroll_position = 0;
+          self.current_view = ConfigView::System;
+          self.scroll_position = 0;
         } else if self.current_view == ConfigView::System {
-            self.current_view = ConfigView::Partitioning;
-            self.scroll_position = 0;
+          self.current_view = ConfigView::Partitioning;
+          self.scroll_position = 0;
         }
 
         Signal::Wait
@@ -1890,11 +2084,23 @@ impl AgeVerification {
     let help_modal = HelpModal::new(
       "Age verification",
       styled_block(vec![
-        vec![(Some((Color::Yellow, Modifier::BOLD)), "Enter"), (None, " - continue to installation")],
-        vec![(Some((Color::Yellow, Modifier::BOLD)), "Esc"), (None, " - go back to the previous page")],
-        vec![(Some((Color::Yellow, Modifier::BOLD)), "?"), (None, " - show this help")],
+        vec![
+          (Some((Color::Yellow, Modifier::BOLD)), "Enter"),
+          (None, " - continue to installation"),
+        ],
+        vec![
+          (Some((Color::Yellow, Modifier::BOLD)), "Esc"),
+          (None, " - go back to the previous page"),
+        ],
+        vec![
+          (Some((Color::Yellow, Modifier::BOLD)), "?"),
+          (None, " - show this help"),
+        ],
         vec![(None, "")],
-        vec![(None, "This is a serious verification process, in the sense that it has a window and a button.")],
+        vec![(
+          None,
+          "This is a serious verification process, in the sense that it has a window and a button.",
+        )],
       ]),
     );
 
@@ -1947,7 +2153,8 @@ If you can run this installer, you are already overqualified."
   }
 
   fn joke_fully_visible(&self) -> bool {
-    self.skipped_animation || self.visible_joke_text().chars().count() >= Self::full_joke_text().chars().count()
+    self.skipped_animation
+      || self.visible_joke_text().chars().count() >= Self::full_joke_text().chars().count()
   }
 
   fn popup_area(area: Rect) -> Rect {
@@ -1956,7 +2163,12 @@ If you can run this installer, you are already overqualified."
     let x = area.x + area.width.saturating_sub(popup_width) / 2;
     let y = area.y + area.height.saturating_sub(popup_height) / 2;
 
-    Rect { x, y, width: popup_width, height: popup_height }
+    Rect {
+      x,
+      y,
+      width: popup_width,
+      height: popup_height,
+    }
   }
 
   fn start_install(&mut self) -> Signal {
@@ -1965,7 +2177,9 @@ If you can run this installer, you are already overqualified."
     };
 
     let Some(partition_cfg) = self.partition_cfg.take() else {
-      return Signal::Error(anyhow::anyhow!("Partition config temp file already consumed"));
+      return Signal::Error(anyhow::anyhow!(
+        "Partition config temp file already consumed"
+      ));
     };
 
     match InstallProgress::new(system_cfg, partition_cfg, self.log_path.clone()) {
@@ -1999,7 +2213,9 @@ impl Page for AgeVerification {
           if !first_line.is_empty() {
             lines.push(Line::from(vec![Span::styled(
               first_line.to_string(),
-              Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+              Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
             )]));
           } else {
             lines.push(Line::from(""));
@@ -2141,7 +2357,11 @@ pub struct InstallProgress<'a> {
 }
 
 impl<'a> InstallProgress<'a> {
-  pub fn new(system_cfg: NamedTempFile, partition_cfg: NamedTempFile, log_path: PathBuf) -> anyhow::Result<Self> {
+  pub fn new(
+    system_cfg: NamedTempFile,
+    partition_cfg: NamedTempFile,
+    log_path: PathBuf,
+  ) -> anyhow::Result<Self> {
     let install_steps = Self::install_commands(system_cfg.path(), partition_cfg.path(), &log_path)?;
 
     let mut steps = InstallSteps::new("Install Steps", install_steps);
@@ -2151,8 +2371,14 @@ impl<'a> InstallProgress<'a> {
       help_line("Esc", " - Exit installation (if failed)"),
       help_line("?", " - Show this help"),
       vec![(None, "")],
-      vec![(None, "This page shows the progress of the Athena OS installation process.")],
-      vec![(None, "Installation steps are executed sequentially and their status is shown above.")],
+      vec![(
+        None,
+        "This page shows the progress of the Athena OS installation process.",
+      )],
+      vec![(
+        None,
+        "Installation steps are executed sequentially and their status is shown above.",
+      )],
     ]);
     let help_modal = HelpModal::new("Installation Progress", help_content);
 
@@ -2185,7 +2411,10 @@ impl<'a> InstallProgress<'a> {
     log_file_path: &Path,
   ) -> anyhow::Result<Vec<(Line<'static>, VecDeque<Command>)>> {
     let exe = std::env::current_exe()?;
-    let log = std::fs::OpenOptions::new().append(true).create(true).open(log_file_path)?;
+    let log = std::fs::OpenOptions::new()
+      .append(true)
+      .create(true)
+      .open(log_file_path)?;
     let mut install = Command::new(exe);
     install
       .arg("--system-file")
@@ -2194,7 +2423,10 @@ impl<'a> InstallProgress<'a> {
       .arg(disk_cfg_path)
       .stdout(Stdio::from(log.try_clone()?))
       .stderr(Stdio::from(log));
-    Ok(vec![(Line::from("Athena OS Installation..."), VecDeque::from([install]))])
+    Ok(vec![(
+      Line::from("Athena OS Installation..."),
+      VecDeque::from([install]),
+    )])
   }
 }
 
@@ -2205,7 +2437,11 @@ impl Page for InstallProgress<'_> {
     let _ = self.log_box.poll_log();
 
     let chunks = split_vert!(area, 1, [Constraint::Min(0), Constraint::Length(3)]);
-    let hor_chunks = split_hor!(chunks[0], 1, [Constraint::Percentage(30), Constraint::Percentage(70)]);
+    let hor_chunks = split_hor!(
+      chunks[0],
+      1,
+      [Constraint::Percentage(30), Constraint::Percentage(70)]
+    );
 
     self.steps.render(f, hor_chunks[0]);
     self.log_box.render(f, hor_chunks[1]);
@@ -2224,7 +2460,9 @@ impl Page for InstallProgress<'_> {
   /// for the top page, so this fires once: afterwards the outcome page is on top.
   fn signal(&self) -> Option<Signal> {
     if self.steps.has_error() {
-      Some(Signal::Push(Box::new(InstallFailed::new(self.log_file.clone()))))
+      Some(Signal::Push(Box::new(InstallFailed::new(
+        self.log_file.clone(),
+      ))))
     } else if self.steps.is_complete() {
       Some(Signal::Push(Box::new(InstallComplete::new())))
     } else {
@@ -2313,14 +2551,23 @@ enum LogGenState {
 fn redact_log(contents: &str) -> String {
   contents
     .lines()
-    .filter(|l| !(l.contains("password_hash") || l.contains("root_passwd_hash") || l.contains("$6$") || l.contains("$y$")))
+    .filter(|l| {
+      !(l.contains("password_hash")
+        || l.contains("root_passwd_hash")
+        || l.contains("$6$")
+        || l.contains("$y$"))
+    })
     .collect::<Vec<_>>()
     .join("\n")
 }
 
 impl InstallFailed {
   pub fn new(log_path: PathBuf) -> Self {
-    Self { log_path, state: LogGenState::Idle, rx: None }
+    Self {
+      log_path,
+      state: LogGenState::Idle,
+      rx: None,
+    }
   }
 
   fn start_generation(&mut self) {
@@ -2338,15 +2585,26 @@ impl InstallFailed {
         }
       };
       let result = (|| -> Result<String, String> {
-        let mut stream = TcpStream::connect(("termbin.com", 9999)).map_err(|e| format!("Connection error: {e}"))?;
+        let mut stream = TcpStream::connect(("termbin.com", 9999))
+          .map_err(|e| format!("Connection error: {e}"))?;
         stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
         stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-        stream.write_all(contents.as_bytes()).map_err(|e| format!("Write error: {e}"))?;
+        stream
+          .write_all(contents.as_bytes())
+          .map_err(|e| format!("Write error: {e}"))?;
         let mut response = String::new();
         // termbin closes the connection after sending the link
-        stream.read_to_string(&mut response).map_err(|e| format!("Read error: {e}"))?;
-        let link = response.trim_matches(|c: char| c.is_whitespace() || c == '\0').to_string();
-        if link.is_empty() { Err("No response from termbin".into()) } else { Ok(link) }
+        stream
+          .read_to_string(&mut response)
+          .map_err(|e| format!("Read error: {e}"))?;
+        let link = response
+          .trim_matches(|c: char| c.is_whitespace() || c == '\0')
+          .to_string();
+        if link.is_empty() {
+          Err("No response from termbin".into())
+        } else {
+          Ok(link)
+        }
       })();
       let _ = tx.send(result);
     });
@@ -2365,22 +2623,43 @@ impl InstallFailed {
   }
 
   fn content_lines(&self) -> Vec<Line<'static>> {
-    let nav = [help_line("Esc/Q", " - Go back"), help_line("Enter", " - Exit installer")];
+    let nav = [
+      help_line("Esc/Q", " - Go back"),
+      help_line("Enter", " - Exit installer"),
+    ];
     let mut lines: Vec<StyledLine> = match &self.state {
       LogGenState::Idle => vec![
         vec![(None, "Athena OS installation FAILED.".into())],
-        vec![(None, format!("The full log is in {}.", self.log_path.display()))],
+        vec![(
+          None,
+          format!("The full log is in {}.", self.log_path.display()),
+        )],
         vec![(None, String::new())],
-        vec![(KEY, "Press 'G'".into()), (None, " to upload the log to termbin.com and get a shareable link.".into())],
+        vec![
+          (KEY, "Press 'G'".into()),
+          (
+            None,
+            " to upload the log to termbin.com and get a shareable link.".into(),
+          ),
+        ],
       ],
       LogGenState::Confirm => vec![
-        vec![(Some((Color::Red, Modifier::BOLD)), "The log will be uploaded to termbin.com (public, unencrypted).".into())],
-        vec![(None, "Password hashes are stripped; hostname, user names and package names are not.".into())],
+        vec![(
+          Some((Color::Red, Modifier::BOLD)),
+          "The log will be uploaded to termbin.com (public, unencrypted).".into(),
+        )],
+        vec![(
+          None,
+          "Password hashes are stripped; hostname, user names and package names are not.".into(),
+        )],
         vec![(None, String::new())],
         vec![(KEY, "Y".into()), (None, " - Upload now".into())],
         vec![(KEY, "N".into()), (None, " - Cancel".into())],
       ],
-      LogGenState::Running => vec![vec![(None, "Generating log link... contacting termbin.com".into())]],
+      LogGenState::Running => vec![vec![(
+        None,
+        "Generating log link... contacting termbin.com".into(),
+      )]],
       LogGenState::Done(url) => vec![
         vec![(None, "Log link generated successfully:".into())],
         vec![(Some((Color::Cyan, Modifier::BOLD)), url.clone())],
@@ -2392,7 +2671,11 @@ impl InstallFailed {
       ],
     };
     lines.push(vec![(None, String::new())]);
-    lines.extend(nav.into_iter().map(|l| l.into_iter().map(|(s, t)| (s, t.to_string())).collect()));
+    lines.extend(
+      nav
+        .into_iter()
+        .map(|l| l.into_iter().map(|(s, t)| (s, t.to_string())).collect()),
+    );
     styled_block(lines)
   }
 }
@@ -2411,7 +2694,9 @@ impl Page for InstallFailed {
   fn handle_input(&mut self, _installer: &mut Installer, event: KeyEvent) -> Signal {
     match (&self.state, event.code) {
       (LogGenState::Confirm, KeyCode::Char('y') | KeyCode::Char('Y')) => self.start_generation(),
-      (LogGenState::Confirm, KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc) => self.state = LogGenState::Idle,
+      (LogGenState::Confirm, KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc) => {
+        self.state = LogGenState::Idle
+      }
       (LogGenState::Idle | LogGenState::Error(_), KeyCode::Char('g') | KeyCode::Char('G')) => {
         self.state = LogGenState::Confirm;
       }

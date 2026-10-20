@@ -15,312 +15,318 @@ const HIGHLIGHT: Option<(Color, Modifier)> = Some((Color::Yellow, Modifier::BOLD
 /// Decode base64+gzip into a String, converting literal "\x1b" sequences into
 /// real escapes. Results are cached: pages render these on every redraw.
 pub fn decode_logo(encoded: &'static str) -> String {
-    static CACHE: LazyLock<Mutex<HashMap<&'static str, String>>> = LazyLock::new(Default::default);
-    if let Some(hit) = CACHE.lock().expect("logo cache").get(encoded) {
-        return hit.clone();
-    }
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .expect("Invalid base64");
-    let mut out = String::new();
-    GzDecoder::new(&bytes[..])
-        .read_to_string(&mut out)
-        .expect("Decompression failed");
-    let out = out.replace("\\x1b", "\x1b");
-    CACHE.lock().expect("logo cache").insert(encoded, out.clone());
-    out
+  static CACHE: LazyLock<Mutex<HashMap<&'static str, String>>> = LazyLock::new(Default::default);
+  if let Some(hit) = CACHE.lock().expect("logo cache").get(encoded) {
+    return hit.clone();
+  }
+  let bytes = base64::engine::general_purpose::STANDARD
+    .decode(encoded)
+    .expect("Invalid base64");
+  let mut out = String::new();
+  GzDecoder::new(&bytes[..])
+    .read_to_string(&mut out)
+    .expect("Decompression failed");
+  let out = out.replace("\\x1b", "\x1b");
+  CACHE
+    .lock()
+    .expect("logo cache")
+    .insert(encoded, out.clone());
+  out
 }
 
 /// Locales offered by the Locale page (locale.gen lines).
 pub const LOCALES: &[&str] = &[
-    "aa_DJ.UTF-8 UTF-8",
-    "af_ZA.UTF-8 UTF-8",
-    "an_ES.UTF-8 UTF-8",
-    "ar_AE.UTF-8 UTF-8",
-    "ar_BH.UTF-8 UTF-8",
-    "ar_DZ.UTF-8 UTF-8",
-    "ar_EG.UTF-8 UTF-8",
-    "ar_IQ.UTF-8 UTF-8",
-    "ar_JO.UTF-8 UTF-8",
-    "ar_KW.UTF-8 UTF-8",
-    "ar_LB.UTF-8 UTF-8",
-    "ar_LY.UTF-8 UTF-8",
-    "ar_MA.UTF-8 UTF-8",
-    "ar_OM.UTF-8 UTF-8",
-    "ar_QA.UTF-8 UTF-8",
-    "ar_SA.UTF-8 UTF-8",
-    "ar_SD.UTF-8 UTF-8",
-    "ar_SY.UTF-8 UTF-8",
-    "ar_TN.UTF-8 UTF-8",
-    "ar_YE.UTF-8 UTF-8",
-    "ast_ES.UTF-8 UTF-8",
-    "be_BY.UTF-8 UTF-8",
-    "bhb_IN.UTF-8 UTF-8",
-    "bg_BG.UTF-8 UTF-8",
-    "br_FR.UTF-8 UTF-8",
-    "bs_BA.UTF-8 UTF-8",
-    "ca_AD.UTF-8 UTF-8",
-    "ca_ES.UTF-8 UTF-8",
-    "ca_FR.UTF-8 UTF-8",
-    "ca_IT.UTF-8 UTF-8",
-    "cs_CZ.UTF-8 UTF-8",
-    "cy_GB.UTF-8 UTF-8",
-    "da_DK.UTF-8 UTF-8",
-    "de_AT.UTF-8 UTF-8",
-    "de_BE.UTF-8 UTF-8",
-    "de_CH.UTF-8 UTF-8",
-    "de_DE.UTF-8 UTF-8",
-    "de_IT.UTF-8 UTF-8",
-    "de_LI.UTF-8 UTF-8",
-    "de_LU.UTF-8 UTF-8",
-    "el_GR.UTF-8 UTF-8",
-    "el_CY.UTF-8 UTF-8",
-    "en_AU.UTF-8 UTF-8",
-    "en_BW.UTF-8 UTF-8",
-    "en_CA.UTF-8 UTF-8",
-    "en_DK.UTF-8 UTF-8",
-    "en_GB.UTF-8 UTF-8",
-    "en_HK.UTF-8 UTF-8",
-    "en_IE.UTF-8 UTF-8",
-    "en_NZ.UTF-8 UTF-8",
-    "en_PH.UTF-8 UTF-8",
-    "en_SC.UTF-8 UTF-8",
-    "en_SG.UTF-8 UTF-8",
-    "en_US.UTF-8 UTF-8",
-    "en_ZA.UTF-8 UTF-8",
-    "en_ZW.UTF-8 UTF-8",
-    "es_AR.UTF-8 UTF-8",
-    "es_BO.UTF-8 UTF-8",
-    "es_CL.UTF-8 UTF-8",
-    "es_CO.UTF-8 UTF-8",
-    "es_CR.UTF-8 UTF-8",
-    "es_DO.UTF-8 UTF-8",
-    "es_EC.UTF-8 UTF-8",
-    "es_ES.UTF-8 UTF-8",
-    "es_GT.UTF-8 UTF-8",
-    "es_HN.UTF-8 UTF-8",
-    "es_MX.UTF-8 UTF-8",
-    "es_NI.UTF-8 UTF-8",
-    "es_PA.UTF-8 UTF-8",
-    "es_PE.UTF-8 UTF-8",
-    "es_PR.UTF-8 UTF-8",
-    "es_PY.UTF-8 UTF-8",
-    "es_SV.UTF-8 UTF-8",
-    "es_US.UTF-8 UTF-8",
-    "es_UY.UTF-8 UTF-8",
-    "es_VE.UTF-8 UTF-8",
-    "et_EE.UTF-8 UTF-8",
-    "eu_ES.UTF-8 UTF-8",
-    "fo_FO.UTF-8 UTF-8",
-    "fr_BE.UTF-8 UTF-8",
-    "fr_CA.UTF-8 UTF-8",
-    "fr_CH.UTF-8 UTF-8",
-    "fr_FR.UTF-8 UTF-8",
-    "fr_LU.UTF-8 UTF-8",
-    "ga_IE.UTF-8 UTF-8",
-    "gd_GB.UTF-8 UTF-8",
-    "gl_ES.UTF-8 UTF-8",
-    "gv_GB.UTF-8 UTF-8",
-    "he_IL.UTF-8 UTF-8",
-    "hr_HR.UTF-8 UTF-8",
-    "hsb_DE.UTF-8 UTF-8",
-    "hu_HU.UTF-8 UTF-8",
-    "id_ID.UTF-8 UTF-8",
-    "is_IS.UTF-8 UTF-8",
-    "it_CH.UTF-8 UTF-8",
-    "it_IT.UTF-8 UTF-8",
-    "ja_JP.UTF-8 UTF-8",
-    "ka_GE.UTF-8 UTF-8",
-    "kk_KZ.UTF-8 UTF-8",
-    "kl_GL.UTF-8 UTF-8",
-    "ko_KR.UTF-8 UTF-8",
-    "kw_GB.UTF-8 UTF-8",
-    "lg_UG.UTF-8 UTF-8",
-    "lt_LT.UTF-8 UTF-8",
-    "ltg_LV.UTF-8 UTF-8",
-    "lv_LV.UTF-8 UTF-8",
-    "mg_MG.UTF-8 UTF-8",
-    "mi_NZ.UTF-8 UTF-8",
-    "mk_MK.UTF-8 UTF-8",
-    "ms_MY.UTF-8 UTF-8",
-    "mt_MT.UTF-8 UTF-8",
-    "nb_NO.UTF-8 UTF-8",
-    "nl_BE.UTF-8 UTF-8",
-    "nl_NL.UTF-8 UTF-8",
-    "nn_NO.UTF-8 UTF-8",
-    "oc_FR.UTF-8 UTF-8",
-    "om_KE.UTF-8 UTF-8",
-    "pl_PL.UTF-8 UTF-8",
-    "pt_BR.UTF-8 UTF-8",
-    "pt_PT.UTF-8 UTF-8",
-    "ro_RO.UTF-8 UTF-8",
-    "ru_RU.UTF-8 UTF-8",
-    "ru_UA.UTF-8 UTF-8",
-    "sk_SK.UTF-8 UTF-8",
-    "sl_SI.UTF-8 UTF-8",
-    "so_DJ.UTF-8 UTF-8",
-    "so_KE.UTF-8 UTF-8",
-    "so_SO.UTF-8 UTF-8",
-    "sq_AL.UTF-8 UTF-8",
-    "st_ZA.UTF-8 UTF-8",
-    "sv_FI.UTF-8 UTF-8",
-    "sv_SE.UTF-8 UTF-8",
-    "tcy_IN.UTF-8 UTF-8",
-    "tg_TJ.UTF-8 UTF-8",
-    "th_TH.UTF-8 UTF-8",
-    "tl_PH.UTF-8 UTF-8",
-    "tr_CY.UTF-8 UTF-8",
-    "tr_TR.UTF-8 UTF-8",
-    "uk_UA.UTF-8 UTF-8",
-    "uz_UZ.UTF-8 UTF-8",
-    "wa_BE.UTF-8 UTF-8",
-    "xh_ZA.UTF-8 UTF-8",
-    "yi_US.UTF-8 UTF-8",
-    "zh_CN.UTF-8 UTF-8",
-    "zh_HK.UTF-8 UTF-8",
-    "zh_SG.UTF-8 UTF-8",
-    "zh_TW.UTF-8 UTF-8",
-    "zu_ZA.UTF-8 UTF-8",
+  "aa_DJ.UTF-8 UTF-8",
+  "af_ZA.UTF-8 UTF-8",
+  "an_ES.UTF-8 UTF-8",
+  "ar_AE.UTF-8 UTF-8",
+  "ar_BH.UTF-8 UTF-8",
+  "ar_DZ.UTF-8 UTF-8",
+  "ar_EG.UTF-8 UTF-8",
+  "ar_IQ.UTF-8 UTF-8",
+  "ar_JO.UTF-8 UTF-8",
+  "ar_KW.UTF-8 UTF-8",
+  "ar_LB.UTF-8 UTF-8",
+  "ar_LY.UTF-8 UTF-8",
+  "ar_MA.UTF-8 UTF-8",
+  "ar_OM.UTF-8 UTF-8",
+  "ar_QA.UTF-8 UTF-8",
+  "ar_SA.UTF-8 UTF-8",
+  "ar_SD.UTF-8 UTF-8",
+  "ar_SY.UTF-8 UTF-8",
+  "ar_TN.UTF-8 UTF-8",
+  "ar_YE.UTF-8 UTF-8",
+  "ast_ES.UTF-8 UTF-8",
+  "be_BY.UTF-8 UTF-8",
+  "bhb_IN.UTF-8 UTF-8",
+  "bg_BG.UTF-8 UTF-8",
+  "br_FR.UTF-8 UTF-8",
+  "bs_BA.UTF-8 UTF-8",
+  "ca_AD.UTF-8 UTF-8",
+  "ca_ES.UTF-8 UTF-8",
+  "ca_FR.UTF-8 UTF-8",
+  "ca_IT.UTF-8 UTF-8",
+  "cs_CZ.UTF-8 UTF-8",
+  "cy_GB.UTF-8 UTF-8",
+  "da_DK.UTF-8 UTF-8",
+  "de_AT.UTF-8 UTF-8",
+  "de_BE.UTF-8 UTF-8",
+  "de_CH.UTF-8 UTF-8",
+  "de_DE.UTF-8 UTF-8",
+  "de_IT.UTF-8 UTF-8",
+  "de_LI.UTF-8 UTF-8",
+  "de_LU.UTF-8 UTF-8",
+  "el_GR.UTF-8 UTF-8",
+  "el_CY.UTF-8 UTF-8",
+  "en_AU.UTF-8 UTF-8",
+  "en_BW.UTF-8 UTF-8",
+  "en_CA.UTF-8 UTF-8",
+  "en_DK.UTF-8 UTF-8",
+  "en_GB.UTF-8 UTF-8",
+  "en_HK.UTF-8 UTF-8",
+  "en_IE.UTF-8 UTF-8",
+  "en_NZ.UTF-8 UTF-8",
+  "en_PH.UTF-8 UTF-8",
+  "en_SC.UTF-8 UTF-8",
+  "en_SG.UTF-8 UTF-8",
+  "en_US.UTF-8 UTF-8",
+  "en_ZA.UTF-8 UTF-8",
+  "en_ZW.UTF-8 UTF-8",
+  "es_AR.UTF-8 UTF-8",
+  "es_BO.UTF-8 UTF-8",
+  "es_CL.UTF-8 UTF-8",
+  "es_CO.UTF-8 UTF-8",
+  "es_CR.UTF-8 UTF-8",
+  "es_DO.UTF-8 UTF-8",
+  "es_EC.UTF-8 UTF-8",
+  "es_ES.UTF-8 UTF-8",
+  "es_GT.UTF-8 UTF-8",
+  "es_HN.UTF-8 UTF-8",
+  "es_MX.UTF-8 UTF-8",
+  "es_NI.UTF-8 UTF-8",
+  "es_PA.UTF-8 UTF-8",
+  "es_PE.UTF-8 UTF-8",
+  "es_PR.UTF-8 UTF-8",
+  "es_PY.UTF-8 UTF-8",
+  "es_SV.UTF-8 UTF-8",
+  "es_US.UTF-8 UTF-8",
+  "es_UY.UTF-8 UTF-8",
+  "es_VE.UTF-8 UTF-8",
+  "et_EE.UTF-8 UTF-8",
+  "eu_ES.UTF-8 UTF-8",
+  "fo_FO.UTF-8 UTF-8",
+  "fr_BE.UTF-8 UTF-8",
+  "fr_CA.UTF-8 UTF-8",
+  "fr_CH.UTF-8 UTF-8",
+  "fr_FR.UTF-8 UTF-8",
+  "fr_LU.UTF-8 UTF-8",
+  "ga_IE.UTF-8 UTF-8",
+  "gd_GB.UTF-8 UTF-8",
+  "gl_ES.UTF-8 UTF-8",
+  "gv_GB.UTF-8 UTF-8",
+  "he_IL.UTF-8 UTF-8",
+  "hr_HR.UTF-8 UTF-8",
+  "hsb_DE.UTF-8 UTF-8",
+  "hu_HU.UTF-8 UTF-8",
+  "id_ID.UTF-8 UTF-8",
+  "is_IS.UTF-8 UTF-8",
+  "it_CH.UTF-8 UTF-8",
+  "it_IT.UTF-8 UTF-8",
+  "ja_JP.UTF-8 UTF-8",
+  "ka_GE.UTF-8 UTF-8",
+  "kk_KZ.UTF-8 UTF-8",
+  "kl_GL.UTF-8 UTF-8",
+  "ko_KR.UTF-8 UTF-8",
+  "kw_GB.UTF-8 UTF-8",
+  "lg_UG.UTF-8 UTF-8",
+  "lt_LT.UTF-8 UTF-8",
+  "ltg_LV.UTF-8 UTF-8",
+  "lv_LV.UTF-8 UTF-8",
+  "mg_MG.UTF-8 UTF-8",
+  "mi_NZ.UTF-8 UTF-8",
+  "mk_MK.UTF-8 UTF-8",
+  "ms_MY.UTF-8 UTF-8",
+  "mt_MT.UTF-8 UTF-8",
+  "nb_NO.UTF-8 UTF-8",
+  "nl_BE.UTF-8 UTF-8",
+  "nl_NL.UTF-8 UTF-8",
+  "nn_NO.UTF-8 UTF-8",
+  "oc_FR.UTF-8 UTF-8",
+  "om_KE.UTF-8 UTF-8",
+  "pl_PL.UTF-8 UTF-8",
+  "pt_BR.UTF-8 UTF-8",
+  "pt_PT.UTF-8 UTF-8",
+  "ro_RO.UTF-8 UTF-8",
+  "ru_RU.UTF-8 UTF-8",
+  "ru_UA.UTF-8 UTF-8",
+  "sk_SK.UTF-8 UTF-8",
+  "sl_SI.UTF-8 UTF-8",
+  "so_DJ.UTF-8 UTF-8",
+  "so_KE.UTF-8 UTF-8",
+  "so_SO.UTF-8 UTF-8",
+  "sq_AL.UTF-8 UTF-8",
+  "st_ZA.UTF-8 UTF-8",
+  "sv_FI.UTF-8 UTF-8",
+  "sv_SE.UTF-8 UTF-8",
+  "tcy_IN.UTF-8 UTF-8",
+  "tg_TJ.UTF-8 UTF-8",
+  "th_TH.UTF-8 UTF-8",
+  "tl_PH.UTF-8 UTF-8",
+  "tr_CY.UTF-8 UTF-8",
+  "tr_TR.UTF-8 UTF-8",
+  "uk_UA.UTF-8 UTF-8",
+  "uz_UZ.UTF-8 UTF-8",
+  "wa_BE.UTF-8 UTF-8",
+  "xh_ZA.UTF-8 UTF-8",
+  "yi_US.UTF-8 UTF-8",
+  "zh_CN.UTF-8 UTF-8",
+  "zh_HK.UTF-8 UTF-8",
+  "zh_SG.UTF-8 UTF-8",
+  "zh_TW.UTF-8 UTF-8",
+  "zu_ZA.UTF-8 UTF-8",
 ];
 
 pub fn base_system_info(name: &str) -> InfoBox<'static> {
   match name {
     "Athena Arch" => {
+      let logo = decode_logo(
+        "H4sIAAAAAAAAA52TUQ6EIAxE/z0FRyWuGg+waTRovFtPIilxV2Va0H7SmddCi3MwmLpGy2xMI9OM80d6NERXjaFEQl3O1DJ9mTzTUuk5FejFviJvbtQbqyj7xIwRzwmQ8xaDYCVWkLloowFEExgOjUY7o+zW/qqKtoovptIG2bCO6RP3rKnm/a5qXfbWpgJNz+/vm5SOddyVFqWTwyGfx+cEAYSsMvCn7Yi2HWcEzBuVBAAA",
+      );
+      let mut blocks = vec![
+        vec![
+          (HIGHLIGHT, "Athena Arch"),
+          (None, " is based on "),
+          (HIGHLIGHT, "Arch Linux"),
+          (None, ", offering a "),
+          (HIGHLIGHT, "rolling-release, lightweight environment"),
+          (None, " with access to the "),
+          (HIGHLIGHT, "AUR and bleeding-edge packages"),
+          (None, "."),
+        ],
+        vec![
+          (None, "It ships with the "),
+          (HIGHLIGHT, "Pacman package manager"),
+          (None, " and integrates a fork of the "),
+          (HIGHLIGHT, "BlackArch repository"),
+          (None, ", providing "),
+          (HIGHLIGHT, "2800+ pentesting tools"),
+          (None, " that are "),
+          (HIGHLIGHT, "GPG-signed for trust"),
+          (None, "."),
+        ],
+        vec![
+          (None, "Athena Arch is "),
+          (HIGHLIGHT, "highly customizable and fast to update"),
+          (None, " but requires "),
+          (HIGHLIGHT, "manual setup and maintenance"),
+          (None, "; ideal for those who prefer "),
+          (HIGHLIGHT, "DIY configuration and bleeding-edge software"),
+          (None, "."),
+        ],
+      ];
 
-        let logo = decode_logo(
-            "H4sIAAAAAAAAA52TUQ6EIAxE/z0FRyWuGg+waTRovFtPIilxV2Va0H7SmddCi3MwmLpGy2xMI9OM80d6NERXjaFEQl3O1DJ9mTzTUuk5FejFviJvbtQbqyj7xIwRzwmQ8xaDYCVWkLloowFEExgOjUY7o+zW/qqKtoovptIG2bCO6RP3rKnm/a5qXfbWpgJNz+/vm5SOddyVFqWTwyGfx+cEAYSsMvCn7Yi2HWcEzBuVBAAA"
-        );
-        let mut blocks = vec![
-            vec![
-                (HIGHLIGHT, "Athena Arch"),
-                (None, " is based on "),
-                (HIGHLIGHT, "Arch Linux"),
-                (None, ", offering a "),
-                (HIGHLIGHT, "rolling-release, lightweight environment"),
-                (None, " with access to the "),
-                (HIGHLIGHT, "AUR and bleeding-edge packages"),
-                (None, "."),
-            ],
-            vec![
-                (None, "It ships with the "),
-                (HIGHLIGHT, "Pacman package manager"),
-                (None, " and integrates a fork of the "),
-                (HIGHLIGHT, "BlackArch repository"),
-                (None, ", providing "),
-                (HIGHLIGHT, "2800+ pentesting tools"),
-                (None, " that are "),
-                (HIGHLIGHT, "GPG-signed for trust"),
-                (None, "."),
-            ],
-            vec![
-                (None, "Athena Arch is "),
-                (HIGHLIGHT, "highly customizable and fast to update"),
-                (None, " but requires "),
-                (HIGHLIGHT, "manual setup and maintenance"),
-                (None, "; ideal for those who prefer "),
-                (HIGHLIGHT, "DIY configuration and bleeding-edge software"),
-                (None, "."),
-            ],
-        ];
+      // append the logo *line by line*
+      for line in logo.lines() {
+        blocks.push(vec![(None, line)]);
+      }
 
-        // append the logo *line by line*
-        for line in logo.lines() {
-            blocks.push(vec![(None, line)]);
-        }
-
-        InfoBox::new("Athena Arch", styled_block(blocks))
-      },
+      InfoBox::new("Athena Arch", styled_block(blocks))
+    }
     "Athena Nix" => {
+      let logo = decode_logo(
+        "H4sIAAAAAAAAA6WUzQ3DIAyF70zBqDnkkAncWjTqbkzSSlCw8U+tJPIFw/sQz45znl+FR4W9hZLqWbKGlJn8VeH4BVrZCm+SKAwRY7iEEEKKOTMeKMllAjHdo+t34ILE1cOd1sizxnNy2bM8Lh7EY3SKpo/ZteJiPmMym+E+nL1/fXzrCBdqtCPzCAN64bv+U7SjZ4VtxACQAmepDzj416BeftXaizeIaaJWzBgrXveH5pLb+RcIszBtvZF4jlMz9VV/AOenEZ3PBQAA",
+      );
 
-        let logo = decode_logo(
-            "H4sIAAAAAAAAA6WUzQ3DIAyF70zBqDnkkAncWjTqbkzSSlCw8U+tJPIFw/sQz45znl+FR4W9hZLqWbKGlJn8VeH4BVrZCm+SKAwRY7iEEEKKOTMeKMllAjHdo+t34ILE1cOd1sizxnNy2bM8Lh7EY3SKpo/ZteJiPmMym+E+nL1/fXzrCBdqtCPzCAN64bv+U7SjZ4VtxACQAmepDzj416BeftXaizeIaaJWzBgrXveH5pLb+RcIszBtvZF4jlMz9VV/AOenEZ3PBQAA"
-        );
+      let mut blocks = vec![
+        vec![
+          (HIGHLIGHT, "Athena Nix"),
+          (None, " leverages "),
+          (HIGHLIGHT, "NixOS"),
+          (None, " to provide a "),
+          (HIGHLIGHT, "declarative, reproducible Linux system"),
+          (None, " built on the "),
+          (HIGHLIGHT, "Nix package manager"),
+          (None, "."),
+        ],
+        vec![
+          (None, "It enables "),
+          (HIGHLIGHT, "atomic upgrades and rollbacks"),
+          (None, ", "),
+          (HIGHLIGHT, "isolated dependencies"),
+          (None, ", "),
+          (HIGHLIGHT, "per-user profiles"),
+          (None, ", and "),
+          (HIGHLIGHT, "secure package management"),
+          (None, " with automatic CVE checks."),
+        ],
+        vec![
+          (None, "Athena Nix offers "),
+          (
+            HIGHLIGHT,
+            "consistency across systems and CI-friendly workflows",
+          ),
+          (None, " but comes with a "),
+          (HIGHLIGHT, "steeper learning curve and unique paradigms"),
+          (None, "; perfect for users who value "),
+          (
+            HIGHLIGHT,
+            "determinism, reproducibility, and rollback safety",
+          ),
+          (None, "."),
+        ],
+      ];
 
-        let mut blocks = vec![
-            vec![
-              (HIGHLIGHT, "Athena Nix"),
-              (None, " leverages "),
-              (HIGHLIGHT, "NixOS"),
-              (None, " to provide a "),
-              (HIGHLIGHT, "declarative, reproducible Linux system"),
-              (None, " built on the "),
-              (HIGHLIGHT, "Nix package manager"),
-              (None, "."),
-            ],
-            vec![
-              (None, "It enables "),
-              (HIGHLIGHT, "atomic upgrades and rollbacks"),
-              (None, ", "),
-              (HIGHLIGHT, "isolated dependencies"),
-              (None, ", "),
-              (HIGHLIGHT, "per-user profiles"),
-              (None, ", and "),
-              (HIGHLIGHT, "secure package management"),
-              (None, " with automatic CVE checks."),
-            ],
-            vec![
-              (None, "Athena Nix offers "),
-              (HIGHLIGHT, "consistency across systems and CI-friendly workflows"),
-              (None, " but comes with a "),
-              (HIGHLIGHT, "steeper learning curve and unique paradigms"),
-              (None, "; perfect for users who value "),
-              (HIGHLIGHT, "determinism, reproducibility, and rollback safety"),
-              (None, "."),
-            ],
-        ];
+      // append the logo *line by line*
+      for line in logo.lines() {
+        blocks.push(vec![(None, line)]);
+      }
 
-        // append the logo *line by line*
-        for line in logo.lines() {
-            blocks.push(vec![(None, line)]);
-        }
-
-        InfoBox::new("Athena Nix", styled_block(blocks))
-      },
+      InfoBox::new("Athena Nix", styled_block(blocks))
+    }
     "Athena Fedora" => {
+      let logo = decode_logo(
+        "H4sIAAAAAAAAA+NSwAMeTevARDBJLhL1YTUGpyHYNeAwhihTcInRRDOOMFMgwtG4tMIApj5U5cQEO6ZBBHQRGZ0Y5hLSRIah+IOWmHDDrmzo6MehlJSEQzA+cRuDlgBJ1Y0lAaPp4eICAA0CX3KVBAAA",
+      );
+      let mut blocks = vec![
+        vec![
+          (HIGHLIGHT, "Athena Fedora"),
+          (None, " builds on "),
+          (HIGHLIGHT, "Fedora Linux"),
+          (None, " to deliver a "),
+          (HIGHLIGHT, "stable yet modern environment"),
+          (None, " with a focus on "),
+          (HIGHLIGHT, "security and upstream collaboration"),
+          (None, "."),
+        ],
+        vec![
+          (None, "It uses "),
+          (HIGHLIGHT, "DNF and RPM packaging"),
+          (None, ", includes "),
+          (HIGHLIGHT, "SELinux enabled by default"),
+          (None, ", and benefits from "),
+          (HIGHLIGHT, "Fedora's 6-month release cadence"),
+          (None, " ensuring both stability and freshness."),
+        ],
+        vec![
+          (None, "Athena Fedora is "),
+          (HIGHLIGHT, "secure and polished out of the box"),
+          (None, " with "),
+          (HIGHLIGHT, "containerization and Secure Boot support"),
+          (None, ", though it is "),
+          (HIGHLIGHT, "less customizable than Arch"),
+          (None, "; excellent for those wanting "),
+          (HIGHLIGHT, "a dependable and security-hardened workflow"),
+          (None, "."),
+        ],
+      ];
 
-        let logo = decode_logo(
-            "H4sIAAAAAAAAA+NSwAMeTevARDBJLhL1YTUGpyHYNeAwhihTcInRRDOOMFMgwtG4tMIApj5U5cQEO6ZBBHQRGZ0Y5hLSRIah+IOWmHDDrmzo6MehlJSEQzA+cRuDlgBJ1Y0lAaPp4eICAA0CX3KVBAAA"
-        );
-        let mut blocks = vec![
-            vec![
-              (HIGHLIGHT, "Athena Fedora"),
-              (None, " builds on "),
-              (HIGHLIGHT, "Fedora Linux"),
-              (None, " to deliver a "),
-              (HIGHLIGHT, "stable yet modern environment"),
-              (None, " with a focus on "),
-              (HIGHLIGHT, "security and upstream collaboration"),
-              (None, "."),
-            ],
-            vec![
-              (None, "It uses "),
-              (HIGHLIGHT, "DNF and RPM packaging"),
-              (None, ", includes "),
-              (HIGHLIGHT, "SELinux enabled by default"),
-              (None, ", and benefits from "),
-              (HIGHLIGHT, "Fedora's 6-month release cadence"),
-              (None, " ensuring both stability and freshness."),
-            ],
-            vec![
-              (None, "Athena Fedora is "),
-              (HIGHLIGHT, "secure and polished out of the box"),
-              (None, " with "),
-              (HIGHLIGHT, "containerization and Secure Boot support"),
-              (None, ", though it is "),
-              (HIGHLIGHT, "less customizable than Arch"),
-              (None, "; excellent for those wanting "),
-              (HIGHLIGHT, "a dependable and security-hardened workflow"),
-              (None, "."),
-            ],
-        ];
+      // append the logo *line by line*
+      for line in logo.lines() {
+        blocks.push(vec![(None, line)]);
+      }
 
-        // append the logo *line by line*
-        for line in logo.lines() {
-            blocks.push(vec![(None, line)]);
-        }
-
-        InfoBox::new("Athena Fedora", styled_block(blocks))
-      },
+      InfoBox::new("Athena Fedora", styled_block(blocks))
+    }
     _ => InfoBox::new(
       "Unknown Base System",
       styled_block(vec![vec![(
@@ -564,7 +570,10 @@ pub fn desktop_info(name: &str) -> InfoBox<'static> {
     ),
     "None" => InfoBox::new(
       "None",
-      styled_block(vec![vec![(None, "No desktop environment will be installed.")]]),
+      styled_block(vec![vec![(
+        None,
+        "No desktop environment will be installed.",
+      )]]),
     ),
     _ => InfoBox::new(
       "Unknown Desktop Environment",
@@ -1155,7 +1164,10 @@ pub fn display_manager_info(name: &str) -> InfoBox<'static> {
           (None, "."),
         ],
         vec![
-          (None, "Cables and tubes trail from the mask as the character "),
+          (
+            None,
+            "Cables and tubes trail from the mask as the character ",
+          ),
           (HIGHLIGHT, "hunches over a keyboard"),
           (None, " beside a "),
           (HIGHLIGHT, "well-worn laptop"),

@@ -11,7 +11,10 @@ use ratatui::{
   Terminal,
   crossterm::{
     execute,
-    terminal::{Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+      Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
+      enable_raw_mode,
+    },
   },
   layout::Alignment,
   prelude::CrosstermBackend,
@@ -183,7 +186,11 @@ fn render_header(f: &mut ratatui::Frame, title: &str) -> ratatui::layout::Rect {
   let header = split_hor!(
     chunks[0],
     0,
-    [Constraint::Percentage(33), Constraint::Percentage(34), Constraint::Percentage(33)]
+    [
+      Constraint::Percentage(33),
+      Constraint::Percentage(34),
+      Constraint::Percentage(33)
+    ]
   );
   let help_text = Paragraph::new("Press '?' for help")
     .style(Style::default().fg(Color::Gray))
@@ -233,7 +240,11 @@ fn handle_signal(
     Signal::WriteCfg => {
       debug!("WriteCfg signal received - starting installation process");
       let (system_cfg, disko_cfg) = installer.write_config_files()?;
-      page_stack.push(Box::new(AgeVerification::new(system_cfg, disko_cfg, log_path.to_path_buf())));
+      page_stack.push(Box::new(AgeVerification::new(
+        system_cfg,
+        disko_cfg,
+        log_path.to_path_buf(),
+      )));
       Ok(false)
     }
     Signal::Error(err) => Err(err),
@@ -244,7 +255,9 @@ fn handle_signal(
 /// only when a key arrives (or once a second to pick up resizes).
 fn next_key(animated: bool, last_tick: &mut Instant) -> anyhow::Result<Option<event::KeyEvent>> {
   let timeout = if animated {
-    TICK_RATE.checked_sub(last_tick.elapsed()).unwrap_or(Duration::ZERO)
+    TICK_RATE
+      .checked_sub(last_tick.elapsed())
+      .unwrap_or(Duration::ZERO)
   } else {
     IDLE_POLL
   };
@@ -328,5 +341,9 @@ pub fn run_keymap_picker(terminal: &mut Term) -> anyhow::Result<Option<String>> 
     }
   }
 
-  Ok(if user_confirmed { installer.keyboard_layout } else { None })
+  Ok(if user_confirmed {
+    installer.keyboard_layout
+  } else {
+    None
+  })
 }
