@@ -2431,12 +2431,10 @@ impl<'a> InstallProgress<'a> {
       .append(true)
       .create(true)
       .open(log_file_path)?;
-    // Width of the log pane (70% of the screen minus borders): the backend
-    // sizes the package manager's pty to it so progress bars fit.
-    let cols = ratatui::crossterm::terminal::size()
-      .map(|(w, _)| w)
-      .unwrap_or(120);
-    let log_cols = (u32::from(cols) * 70 / 100).saturating_sub(4).max(40);
+    // The backend sizes the package manager's pty to the Logs pane so
+    // progress bars (drawn to the full terminal width) fit on one row.
+    let (cols, rows) = ratatui::crossterm::terminal::size().unwrap_or((120, 40));
+    let log_cols = Self::log_pane_inner_width(cols, rows);
     let mut install = Command::new(exe);
     install
       .arg("--system-file")
@@ -2457,24 +2455,41 @@ impl<'a> InstallProgress<'a> {
   }
 }
 
-impl Page for InstallProgress<'_> {
-  fn render(&mut self, _installer: &mut Installer, f: &mut Frame, area: Rect) {
-    // Tick the steps to update animation and process commands
-    let _ = self.steps.tick();
-    let _ = self.log_box.poll_log();
-
+impl InstallProgress<'_> {
+  /// Page layout: [steps | logs] above the ticker. Shared by `render` and the
+  /// pty-width calculation so the two can never disagree.
+  fn layout(area: Rect) -> (Rect, Rect, Rect) {
     let chunks = split_vert!(area, 1, [Constraint::Min(0), Constraint::Length(3)]);
     let hor_chunks = split_hor!(
       chunks[0],
       1,
       [Constraint::Percentage(30), Constraint::Percentage(70)]
     );
+    (hor_chunks[0], hor_chunks[1], chunks[1])
+  }
 
-    self.steps.render(f, hor_chunks[0]);
-    self.log_box.render(f, hor_chunks[1]);
+  /// Columns available inside the Logs box for a terminal of `cols` x `rows`
+  /// (the page gets everything below the one-line header).
+  fn log_pane_inner_width(cols: u16, rows: u16) -> u16 {
+    let page = Rect::new(0, 1, cols, rows.saturating_sub(1));
+    let (_, logs, _) = Self::layout(page);
+    logs.width.saturating_sub(2).max(40) // borders
+  }
+}
+
+impl Page for InstallProgress<'_> {
+  fn render(&mut self, _installer: &mut Installer, f: &mut Frame, area: Rect) {
+    // Tick the steps to update animation and process commands
+    let _ = self.steps.tick();
+    let _ = self.log_box.poll_log();
+
+    let (steps_area, logs_area, ticker_area) = Self::layout(area);
+
+    self.steps.render(f, steps_area);
+    self.log_box.render(f, logs_area);
 
     self.ticker.tick();
-    self.ticker.render(f, chunks[1]);
+    self.ticker.render(f, ticker_area);
 
     self.help_modal.render(f, area);
   }

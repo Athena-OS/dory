@@ -1920,8 +1920,16 @@ impl<'a> ConfigWidget for LogBox<'a> {
   }
 
   fn render(&self, f: &mut Frame, area: Rect) {
-    // Live progress rows sit at the bottom; the newest log lines fill the rest.
-    let rows = area.height.saturating_sub(2) as usize;
+    let block = Block::default()
+      .title(self.title.as_str())
+      .borders(Borders::ALL);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Live progress rows sit at the bottom and are never wrapped: a bar one
+    // column wider than the pane must be clipped, not pushed onto a second
+    // row that would hide its percentage. The newest log lines fill the rest.
+    let rows = inner.height as usize;
     let live: Vec<Line> = self
       .live_rows
       .iter()
@@ -1929,20 +1937,22 @@ impl<'a> ConfigWidget for LogBox<'a> {
       .map(|r| Line::from(Span::styled(r.clone(), Style::default().fg(Color::Cyan))))
       .collect();
     let live = &live[live.len().saturating_sub(rows)..];
+    let live_height = live.len() as u16;
     let log_rows = rows.saturating_sub(live.len());
     let start = self.line_buf.len().saturating_sub(log_rows);
-    let mut visible: Vec<Line> = self.line_buf.iter().skip(start).cloned().collect();
-    visible.extend_from_slice(live);
+    let visible: Vec<Line> = self.line_buf.iter().skip(start).cloned().collect();
 
-    let paragraph = Paragraph::new(visible)
-      .block(
-        Block::default()
-          .title(self.title.as_str())
-          .borders(Borders::ALL),
-      )
-      .wrap(Wrap { trim: true });
-
-    f.render_widget(paragraph, area);
+    let log_area = Rect {
+      height: inner.height - live_height,
+      ..inner
+    };
+    let live_area = Rect {
+      y: inner.y + log_area.height,
+      height: live_height,
+      ..inner
+    };
+    f.render_widget(Paragraph::new(visible).wrap(Wrap { trim: true }), log_area);
+    f.render_widget(Paragraph::new(live.to_vec()), live_area);
   }
 
   fn focus(&mut self) {
@@ -2261,6 +2271,44 @@ mod tests {
       .map(|c| c.symbol())
       .collect::<String>();
     assert!(!screen.contains("pkg-b"));
+  }
+
+  #[test]
+  fn live_rows_are_clipped_not_wrapped() {
+    use ratatui::{Terminal, backend::TestBackend};
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("dory.log");
+    let live = dir.path().join("dory.live");
+    std::fs::write(&log, "").unwrap();
+    let mut lb = LogBox::new("Logs".into());
+    lb.open_log(&log).unwrap();
+    lb.watch_live(live.clone());
+    // 60 columns of bar on a 40-column pane (38 inside the borders)
+    std::fs::write(
+      &live,
+      format!("(841/841) checking keys {} 100%", "#".repeat(30)),
+    )
+    .unwrap();
+    lb.poll_log().unwrap();
+
+    let mut term = Terminal::new(TestBackend::new(40, 5)).unwrap();
+    term.draw(|f| lb.render(f, f.area())).unwrap();
+    let buf = term.backend().buffer();
+    let row = |y: u16| {
+      (1..39)
+        .map(|x| buf[(x, y)].symbol().to_string())
+        .collect::<String>()
+    };
+    assert!(
+      row(3).starts_with("(841/841) checking keys ####"),
+      "{}",
+      row(3)
+    );
+    assert!(
+      row(2).trim().is_empty(),
+      "wrapped tail must not appear on another row: {:?}",
+      row(2)
+    );
   }
 
   #[test]
