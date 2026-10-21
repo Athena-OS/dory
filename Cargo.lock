@@ -504,6 +504,7 @@ dependencies = [
  "core",
  "flate2",
  "fuzzy-matcher",
+ "libc",
  "log",
  "rand 0.10.1",
  "ratatui",

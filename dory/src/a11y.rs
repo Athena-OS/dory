@@ -34,6 +34,7 @@ use std::{
   cell::RefCell,
   fs::{File, OpenOptions},
   io::{self, BufRead, BufReader, Write},
+  os::unix::process::CommandExt,
   os::unix::{fs::FileExt, net::UnixStream},
   path::Path,
   process::{Command, Stdio},
@@ -217,6 +218,8 @@ fn vt_number(tty_nr: u32) -> Option<u32> {
 
 static SPEAKER: OnceLock<Speaker> = OnceLock::new();
 static SPEAKING: AtomicBool = AtomicBool::new(false);
+/// The natural voice was used this session: espeakup is restarted on exit.
+static VOICE_USED: AtomicBool = AtomicBool::new(false);
 
 /// Whether the installer currently drives speech. Widgets check this before
 /// building any text.
@@ -248,21 +251,24 @@ pub fn init(disabled: bool) -> Option<Session> {
       return None;
     }
   };
+  let speaker = SPEAKER.get_or_init(|| speaker);
+  // Handlers first: from the moment speakup is muted, every way out unmutes.
+  restore_on_signal();
+  SPEAKING.store(true, Ordering::SeqCst);
+  // Mute and flush before the natural voice takes the sound device, so
+  // espeakup is not in the middle of speaking (e.g. echoing "sudo dory").
+  speaker.silent(MUTE_AND_FLUSH);
+  info!("Speech on ({})", speaker.vt);
   match Voice::start(&voice_alsa_device()) {
     Ok(voice) => {
       info!("Speech voice: RHVoice {}", voice.name);
+      VOICE_USED.store(true, Ordering::SeqCst);
       if let Ok(mut slot) = speaker.voice.lock() {
         *slot = Some(voice);
       }
     }
     Err(why) => info!("Speech voice: espeak-ng ({why})"),
   }
-  let speaker = SPEAKER.get_or_init(|| speaker);
-  // Handlers first: from the moment speakup is muted, every way out unmutes.
-  restore_on_signal();
-  SPEAKING.store(true, Ordering::SeqCst);
-  speaker.silent(MUTE_AND_FLUSH);
-  info!("Speech on ({})", speaker.vt);
   Some(Session(()))
 }
 
@@ -272,11 +278,11 @@ pub fn shutdown() {
   if SPEAKING.swap(false, Ordering::SeqCst)
     && let Some(speaker) = SPEAKER.get()
   {
-    // Close the voice: its private speech-dispatcher exits a few seconds
-    // later. try_lock: a panic in the middle of `say` holds the lock.
-    if let Ok(mut voice) = speaker.voice.try_lock() {
-      *voice = None;
-    }
+    // Stop the voice and wait until its speech-dispatcher has released the
+    // sound device, then hand speech back. try_lock: a panic in the middle
+    // of `say` holds the lock.
+    let voice = speaker.voice.try_lock().ok().and_then(|mut v| v.take());
+    drop(voice);
     if speaker.foreground() {
       speaker.silent(UNMUTE_AND_FLUSH);
     } else {
@@ -284,7 +290,23 @@ pub fn shutdown() {
       // muted. Leave a watcher that unmutes ours when the user returns.
       unmute_when_back(&speaker.vt);
     }
+    if VOICE_USED.load(Ordering::SeqCst) {
+      restart_espeakup();
+    }
   }
+}
+
+/// espeakup 0.90 (2021, still Arch's) loops silently forever once a write
+/// to the sound device failed, e.g. while dory's voice held it; recovery
+/// only exists upstream since 2026. A restart is cheap and always clean.
+/// --no-block: queue the job and return, also from the panic hook.
+fn restart_espeakup() {
+  let _ = Command::new("systemctl")
+    .args(["--no-block", "try-restart", "espeakup.service"])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status();
 }
 
 /// Detached shell loop: survives our exit (own process group, so no SIGHUP
@@ -339,6 +361,7 @@ const VOICE: &str = "slt";
 const SPEECHD_DIR: &str = "/run/dory-speech";
 const SPEECHD_START: Duration = Duration::from_secs(4);
 const SPEECHD_REPLY: Duration = Duration::from_secs(2);
+const SPEECHD_STOP: Duration = Duration::from_secs(1);
 
 /// ALSA device for the voice; overridable for tests (`null`).
 fn voice_alsa_device() -> String {
@@ -349,6 +372,40 @@ struct Voice {
   writer: UnixStream,
   reader: BufReader<UnixStream>,
   name: String,
+  /// The private speech-dispatcher, leader of its own process group (its
+  /// modules, which hold the sound device, are in the same group). Only
+  /// held for its `Drop`.
+  #[cfg_attr(not(test), allow(dead_code))]
+  daemon: Daemon,
+}
+
+/// Stops the speech-dispatcher process group when dropped, and waits until
+/// it is gone: espeakup 0.90 (Arch) never recovers when it tries to speak
+/// while the sound device is still busy.
+struct Daemon(std::process::Child);
+
+impl Drop for Daemon {
+  fn drop(&mut self) {
+    let Ok(pgid) = i32::try_from(self.0.id()) else {
+      return;
+    };
+    // SAFETY: plain kill(2) on our own child's process group.
+    let group_alive = || unsafe { libc::kill(-pgid, 0) } == 0;
+    unsafe { libc::kill(-pgid, libc::SIGTERM) };
+    let deadline = Instant::now() + SPEECHD_STOP;
+    loop {
+      // Reap the leader, or it stays in the group as a zombie.
+      let _ = self.0.try_wait();
+      if !group_alive() || Instant::now() >= deadline {
+        break;
+      }
+      std::thread::sleep(Duration::from_millis(10));
+    }
+    if group_alive() {
+      unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    }
+    let _ = self.0.wait();
+  }
 }
 
 impl Voice {
@@ -356,28 +413,43 @@ impl Voice {
     let dir = Path::new(SPEECHD_DIR);
     let conf = dir.join("conf");
     let sock = dir.join("speechd.sock");
-    std::fs::create_dir_all(&conf).map_err(|e| format!("{SPEECHD_DIR}: {e}"))?;
+    let logs = dir.join("log");
+    for d in [&conf, &logs] {
+      std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
     let _ = std::fs::write(conf.join("speechd.conf"), speechd_conf(alsa_device));
     let _ = std::fs::remove_file(&sock);
 
-    let started = Command::new("speech-dispatcher")
-      .args(["-d", "-c", "unix_socket", "-t", "5", "-S"])
-      .arg(&sock)
-      .arg("-C")
-      .arg(&conf)
-      .stdin(Stdio::null())
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .status()
-      .map_err(|e| format!("speech-dispatcher not available ({e})"))?;
-    if !started.success() {
-      return Err(format!("speech-dispatcher failed to start ({started})"));
-    }
+    // Single mode: stays our child, so it can be stopped (with its
+    // modules) before speakup's espeakup needs the sound device again.
+    let mut daemon = Daemon(
+      Command::new("speech-dispatcher")
+        .args(["-s", "-c", "unix_socket", "-t", "0", "-S"])
+        .arg(&sock)
+        .arg("-C")
+        .arg(&conf)
+        .arg("-L")
+        .arg(&logs)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("speech-dispatcher not available ({e})"))?,
+    );
 
     let deadline = Instant::now() + SPEECHD_START;
     let stream = loop {
       match UnixStream::connect(&sock) {
         Ok(s) => break s,
+        // With RHVoice as its only module, speech-dispatcher exits when the
+        // module cannot start (no sound device): say why, from its log.
+        Err(_) if matches!(daemon.0.try_wait(), Ok(Some(_))) => {
+          return Err(match last_error(&logs.join("rhvoice.log")) {
+            Some(e) => format!("RHVoice could not start: {e}"),
+            None => "speech-dispatcher exited".into(),
+          });
+        }
         Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
         Err(e) => return Err(format!("speech-dispatcher did not answer ({e})")),
       }
@@ -394,6 +466,7 @@ impl Voice {
       writer: stream,
       reader,
       name: String::new(),
+      daemon,
     };
 
     voice
@@ -402,7 +475,12 @@ impl Voice {
     // speech-dispatcher answers "OK" to any module name: check the list.
     let modules = voice.cmd("LIST OUTPUT_MODULES").map_err(io_err)?;
     if !modules.iter().any(|m| reply_text(m) == "rhvoice") {
-      return Err("RHVoice is not installed".into());
+      // The module also drops out when it cannot open the sound device:
+      // say which, from its own log.
+      return Err(match last_error(&logs.join("rhvoice.log")) {
+        Some(e) => format!("RHVoice could not start: {e}"),
+        None => "RHVoice is not installed".into(),
+      });
     }
     voice
       .cmd("SET self OUTPUT_MODULE rhvoice")
@@ -453,11 +531,26 @@ impl Voice {
   }
 }
 
+/// Last error line of a speech-dispatcher module log, without its timestamp.
+fn last_error(log: &Path) -> Option<String> {
+  let text = std::fs::read_to_string(log).ok()?;
+  let line = text
+    .lines()
+    .rev()
+    .find(|l| l.to_lowercase().contains("error"))?;
+  // "Wed Oct 21 15:21:53 2026  Audio output initialization error: ..."
+  let msg = line.split_once("  ").map_or(line, |(_, m)| m);
+  Some(msg.trim().to_string())
+}
+
 fn speechd_conf(alsa_device: &str) -> String {
   format!(
     "# Private speech-dispatcher for the dory installer.
 AudioOutputMethod \"alsa\"
 AudioALSADevice \"{alsa_device}\"
+# Only RHVoice: every other module would be started and open the sound
+# device too.
+AddModule \"rhvoice\" \"sd_rhvoice\" \"rhvoice.conf\"
 DefaultModule rhvoice
 DefaultLanguage \"en-US\"
 "
@@ -1285,6 +1378,15 @@ mod tests {
     assert_eq!(reply_text("250-rhvoice"), "rhvoice");
   }
 
+  /// Needs speech-dispatcher with RHVoice installed. Run with `--ignored`.
+  #[test]
+  #[ignore]
+  fn a_sound_device_failure_is_reported_as_such() {
+    let err = Voice::start("no-such-device").err().expect("must fail");
+    assert!(err.starts_with("RHVoice could not start: "), "{err}");
+    assert!(!err.contains("2026"), "timestamp stripped: {err}");
+  }
+
   /// Needs speech-dispatcher with RHVoice and the slt voice installed;
   /// plays to ALSA's `null` device. Run with `--ignored`.
   #[test]
@@ -1298,6 +1400,15 @@ mod tests {
     voice
       .speak(b"Replaced before it finished.\n")
       .expect("interrupt");
+    let pgid = i32::try_from(voice.daemon.0.id()).unwrap();
+    let t = Instant::now();
+    drop(voice);
+    assert!(t.elapsed() < SPEECHD_STOP + Duration::from_millis(200));
+    let alive = unsafe { libc::kill(-pgid, 0) } == 0;
+    assert!(
+      !alive,
+      "speech-dispatcher and its modules are gone after drop"
+    );
   }
 
   #[test]
