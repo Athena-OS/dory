@@ -687,20 +687,34 @@ impl State {
     } else {
       let modal_closed = seen.modal.is_some();
       let full_item = first || repeat || modal_closed;
-      if let Some(focus) = &frame.focus {
-        let prev = seen.focus.as_ref();
-        let region_changed = prev.is_none_or(|p| p.region != focus.region);
-        if (full_item || region_changed) && !focus.region.is_empty() {
-          out.text(&focus.region);
-        }
-        if full_item || region_changed {
-          out.text(&focus.text);
-        } else if prev != Some(focus) {
-          describe_change(focus, prev, &mut out);
-        }
+      let context_changed = first || repeat || frame.context != seen.context;
+      let prev = seen.focus.as_ref();
+      let focus = frame.focus.as_ref();
+      let region_changed = focus.is_some_and(|f| prev.is_none_or(|p| p.region != f.region));
+      let announce = full_item || region_changed;
+      // Typing in a field: the echoed character comes first, a changing
+      // count ("12 matches") after it.
+      let echo = focus.filter(|f| !announce && f.edit.is_some() && prev != Some(*f));
+      if let Some(f) = echo {
+        describe_change(f, prev, &mut out);
       }
-      if first || repeat || frame.context != seen.context {
+      // Otherwise the description first, then the focused control (label,
+      // then control): on a new page the user hears what it is about before
+      // which button or field has focus.
+      if context_changed {
         out.text(&frame.context);
+      }
+      if let Some(f) = focus
+        && echo.is_none()
+      {
+        if announce {
+          if !f.region.is_empty() {
+            out.text(&f.region);
+          }
+          out.text(&f.text);
+        } else if prev != Some(f) {
+          describe_change(f, prev, &mut out);
+        }
       }
     }
     if let Some(alert) = self.alert.take() {
@@ -1073,17 +1087,18 @@ mod tests {
     let mut st = state();
     assert_eq!(
       frame(&mut st, "Main Menu", "Base System, 1 of 12", "About base"),
-      "Main Menu. Base System, 1 of 12. About base"
+      "About base. Main Menu. Base System, 1 of 12"
     );
     // Same frame again (idle redraw): silence.
     assert_eq!(
       frame(&mut st, "Main Menu", "Base System, 1 of 12", "About base"),
       ""
     );
-    // Moving within the same list: no region, new item and new description.
+    // Moving within the same list: new description first, then the item;
+    // the list name is not repeated.
     assert_eq!(
       frame(&mut st, "Main Menu", "Timezone, 2 of 12", "About tz"),
-      "Timezone, 2 of 12. About tz"
+      "About tz. Timezone, 2 of 12"
     );
     // Description unchanged: item only.
     assert_eq!(
@@ -1104,7 +1119,7 @@ mod tests {
     st.repeat = true;
     assert_eq!(
       frame(&mut st, "Main Menu", "Timezone, 2 of 12", "About tz"),
-      "Main Menu. Timezone, 2 of 12. About tz"
+      "About tz. Main Menu. Timezone, 2 of 12"
     );
   }
 
@@ -1126,6 +1141,35 @@ mod tests {
       frame(&mut st, "Main Menu", "Timezone, 2 of 12", "About tz"),
       "Main Menu. Timezone, 2 of 12"
     );
+  }
+
+  #[test]
+  fn fields_and_checkboxes_follow_their_description() {
+    let mut st = state();
+    st.frame.context = "The hostname identifies your computer.".into();
+    assert_eq!(
+      edit_frame(&mut st, "", 0, false),
+      "The hostname identifies your computer. Set Hostname"
+    );
+    assert_eq!(
+      frame(
+        &mut st,
+        "",
+        "Encrypt ROOT (LUKS), checkbox, not checked",
+        "Encrypt ROOT?\nOptionally enable LUKS on the root partition only."
+      ),
+      "Encrypt ROOT? Optionally enable LUKS on the root partition only. \
+       Encrypt ROOT (LUKS), checkbox, not checked"
+    );
+  }
+
+  #[test]
+  fn a_typed_character_comes_before_a_changing_count() {
+    let mut st = state();
+    st.frame.context = "400 matches".into();
+    edit_frame(&mut st, "", 0, false);
+    st.frame.context = "12 matches".into();
+    assert_eq!(edit_frame(&mut st, "r", 1, false), "r. 12 matches");
   }
 
   #[test]

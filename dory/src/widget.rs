@@ -2621,13 +2621,13 @@ mod tests {
     };
     assert_eq!(
       render(&l, "Pick a base."),
-      "Main Menu. Base System, 1 of 2. About. Pick a base."
+      "About. Pick a base. Main Menu. Base System, 1 of 2"
     );
     assert_eq!(render(&l, "Pick a base."), "", "idle redraw is silent");
     l.next_item();
     assert_eq!(
       render(&l, "Pick a zone."),
-      "Timezone, 2 of 2. About. Pick a zone."
+      "About. Pick a zone. Timezone, 2 of 2"
     );
   }
 

@@ -2985,19 +2985,32 @@ mod a11y_tests {
   }
 
   #[test]
+  fn hostname_page_reads_the_explanation_before_the_field() {
+    crate::a11y::enable_for_tests();
+    let mut page = Hostname::new();
+    let said = say_page(&mut page, &mut Installer::new(), 30);
+    assert!(
+      said.starts_with("The hostname is a unique identifier")
+        && said.ends_with("Set Hostname. blank, e.g. 'my-computer'"),
+      "{said}"
+    );
+  }
+
+  #[test]
   fn main_menu_speaks_item_position_and_description_then_only_changes() {
     crate::a11y::enable_for_tests();
     let mut installer = Installer::new();
     let mut menu = Menu::new();
     let first = say(&mut menu, &mut installer);
     assert!(
-      first.starts_with("Main Menu. Base System, 1 of 12. Base System. Select the base system"),
+      first.starts_with("Base System. Select the base system")
+        && first.ends_with("long-term goals. Main Menu. Base System, 1 of 12"),
       "{first}"
     );
     menu.handle_input(&mut installer, key(KeyCode::Down));
     let second = say(&mut menu, &mut installer);
     assert!(
-      second.starts_with("Timezone, 2 of 12. Timezone. Select the timezone"),
+      second.starts_with("Timezone. Select the timezone") && second.ends_with("Timezone, 2 of 12"),
       "{second}"
     );
     assert!(
@@ -3008,8 +3021,8 @@ mod a11y_tests {
     // Jump to the buttons and press Done with nothing configured.
     menu.handle_input(&mut installer, key(KeyCode::End));
     let buttons = say(&mut menu, &mut installer);
-    assert!(buttons.starts_with("Done, button"), "{buttons}");
-    assert!(buttons.contains("Required Config"), "{buttons}");
+    assert!(buttons.starts_with("Required Config"), "{buttons}");
+    assert!(buttons.ends_with("Done, button"), "{buttons}");
     menu.handle_input(&mut installer, key(KeyCode::Enter));
     let refused = say(&mut menu, &mut installer);
     assert!(

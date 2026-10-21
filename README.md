@@ -45,8 +45,8 @@ entry) and with braille displays through brltty.
   takes over speech for its session. A full-screen interface otherwise makes
   speakup read every redraw: fragments, spinners and the scrolling log. Dory
   speaks:
-  * the focused item and its position ("Timezone, 2 of 12"), and the
-    description shown for it, only when they change;
+  * the description shown on the page, then the focused item and its
+    position ("Timezone, 2 of 12"), only when they change;
   * typed and deleted characters in text fields. Password fields say "star"
     and never reveal their content;
   * help popups when they open, and why an action was refused;
