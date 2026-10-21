@@ -55,6 +55,11 @@ entry) and with braille displays through brltty.
     installation log is shown on screen but never spoken; F2 repeats the
     current step.
 
+  The voice is RHVoice's "slt" when speech-dispatcher, `rhvoice` and
+  `rhvoice-voice-slt` are installed (the ISO ships them): Dory starts its own
+  speech-dispatcher instance on ALSA. Otherwise it uses speakup's espeak-ng.
+  speakup itself (the shell, other TTYs) always uses espeak-ng.
+
   | Key | Action |
   |---|---|
   | `F2` | Repeat the focused item and its description |
@@ -88,7 +93,8 @@ Athena Nix does not yet):
   (`/var/lib/espeakup`) whose `.asoundrc` sends it to the sound card used
   during the installation, through dmix. Nothing else is affected. The card
   levels from the live system are saved and restored at boot.
-* **Desktop**: Orca starts automatically after login. On GNOME, MATE and
+* **Desktop**: Orca starts automatically after login, speaking English with
+  RHVoice's "slt" voice and the system's language with espeak-ng. On GNOME, MATE and
   Cinnamon through the `screen-reader-enabled` setting (default changed to on,
   so Super+Alt+S still toggles it on GNOME); on KDE Plasma and XFCE through
   `/etc/xdg/autostart/athena-orca.desktop`. Hyprland and Bspwm do not start it.

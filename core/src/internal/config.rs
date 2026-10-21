@@ -304,7 +304,7 @@ pub fn install_config(inputs: &[ConfigInput], log_path: &str) -> i32 {
     info!("Enabling system services...");
     base::enable_system_services();
     if config.accessibility {
-      accessibility::configure();
+      accessibility::configure(&config.locale);
     }
   }
 

@@ -12,7 +12,8 @@
 //!   speakup reads every byte a full-screen redraw writes, which turns a TUI
 //!   into noise: diff fragments, spinners, log scrolling. While the installer
 //!   runs it switches speakup's screen reading off for its own console and
-//!   speaks itself through `synth_direct`: the focused item, what changed and
+//!   speaks itself, with RHVoice through a private speech-dispatcher when
+//!   available, else through speakup's `synth_direct`: the focused item, what changed and
 //!   help popups. The installation log is never spoken, only the install
 //!   steps and the result page. speakup is restored on exit, on panic and on
 //!   fatal signals.
@@ -32,14 +33,18 @@
 use std::{
   cell::RefCell,
   fs::{File, OpenOptions},
-  os::unix::fs::FileExt,
+  io::{self, BufRead, BufReader, Write},
+  os::unix::{fs::FileExt, net::UnixStream},
+  path::Path,
+  process::{Command, Stdio},
   sync::{
-    OnceLock,
+    Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
   },
+  time::{Duration, Instant},
 };
 
-use log::info;
+use log::{info, warn};
 use ratatui::{
   Terminal,
   backend::Backend,
@@ -79,6 +84,9 @@ struct Speaker {
   active_vt: File,
   /// Our console, e.g. `tty1`.
   vt: String,
+  /// The natural voice, when it could be started; otherwise speech goes to
+  /// speakup's own espeak-ng through `synth_direct`.
+  voice: Mutex<Option<Voice>>,
 }
 
 impl Speaker {
@@ -102,6 +110,7 @@ impl Speaker {
       silent: wo("silent")?,
       active_vt: File::open(ACTIVE_VT).map_err(|e| format!("cannot read {ACTIVE_VT} ({e})"))?,
       vt,
+      voice: Mutex::new(None),
     };
     if !speaker.foreground() {
       return Err(format!("{} is not the foreground console", speaker.vt));
@@ -129,6 +138,17 @@ impl Speaker {
       return;
     }
     self.silent(MUTE_AND_FLUSH);
+    if let Ok(mut voice) = self.voice.lock()
+      && let Some(v) = voice.as_mut()
+    {
+      match v.speak(text) {
+        Ok(()) => return,
+        Err(e) => {
+          warn!("Natural voice failed ({e}), back to espeak-ng");
+          *voice = None;
+        }
+      }
+    }
     for chunk in chunks(text, MAX_WRITE) {
       let _ = self.direct.write_at(chunk, 0);
     }
@@ -228,6 +248,15 @@ pub fn init(disabled: bool) -> Option<Session> {
       return None;
     }
   };
+  match Voice::start(&voice_alsa_device()) {
+    Ok(voice) => {
+      info!("Speech voice: RHVoice {}", voice.name);
+      if let Ok(mut slot) = speaker.voice.lock() {
+        *slot = Some(voice);
+      }
+    }
+    Err(why) => info!("Speech voice: espeak-ng ({why})"),
+  }
   let speaker = SPEAKER.get_or_init(|| speaker);
   // Handlers first: from the moment speakup is muted, every way out unmutes.
   restore_on_signal();
@@ -243,6 +272,11 @@ pub fn shutdown() {
   if SPEAKING.swap(false, Ordering::SeqCst)
     && let Some(speaker) = SPEAKER.get()
   {
+    // Close the voice: its private speech-dispatcher exits a few seconds
+    // later. try_lock: a panic in the middle of `say` holds the lock.
+    if let Ok(mut voice) = speaker.voice.try_lock() {
+      *voice = None;
+    }
     if speaker.foreground() {
       speaker.silent(UNMUTE_AND_FLUSH);
     } else {
@@ -290,6 +324,170 @@ fn restore_on_signal() {
         std::process::exit(128 + sig);
       }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Natural voice: RHVoice through a private speech-dispatcher
+// ---------------------------------------------------------------------------
+
+/// speakup itself can only drive espeak-ng (through espeakup). While dory
+/// runs it does its own speaking anyway, so it can use a natural voice:
+/// RHVoice's "slt" through a private speech-dispatcher instance it starts
+/// itself. That instance uses ALSA (as root there is no PulseAudio or
+/// PipeWire) and exits a few seconds after dory closes the connection.
+const VOICE: &str = "slt";
+const SPEECHD_DIR: &str = "/run/dory-speech";
+const SPEECHD_START: Duration = Duration::from_secs(4);
+const SPEECHD_REPLY: Duration = Duration::from_secs(2);
+
+/// ALSA device for the voice; overridable for tests (`null`).
+fn voice_alsa_device() -> String {
+  std::env::var("DORY_SPEECH_ALSA_DEVICE").unwrap_or_else(|_| "default".into())
+}
+
+struct Voice {
+  writer: UnixStream,
+  reader: BufReader<UnixStream>,
+  name: String,
+}
+
+impl Voice {
+  fn start(alsa_device: &str) -> Result<Self, String> {
+    let dir = Path::new(SPEECHD_DIR);
+    let conf = dir.join("conf");
+    let sock = dir.join("speechd.sock");
+    std::fs::create_dir_all(&conf).map_err(|e| format!("{SPEECHD_DIR}: {e}"))?;
+    let _ = std::fs::write(conf.join("speechd.conf"), speechd_conf(alsa_device));
+    let _ = std::fs::remove_file(&sock);
+
+    let started = Command::new("speech-dispatcher")
+      .args(["-d", "-c", "unix_socket", "-t", "5", "-S"])
+      .arg(&sock)
+      .arg("-C")
+      .arg(&conf)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .status()
+      .map_err(|e| format!("speech-dispatcher not available ({e})"))?;
+    if !started.success() {
+      return Err(format!("speech-dispatcher failed to start ({started})"));
+    }
+
+    let deadline = Instant::now() + SPEECHD_START;
+    let stream = loop {
+      match UnixStream::connect(&sock) {
+        Ok(s) => break s,
+        Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+        Err(e) => return Err(format!("speech-dispatcher did not answer ({e})")),
+      }
+    };
+    let io_err = |e: io::Error| format!("speech-dispatcher: {e}");
+    stream
+      .set_read_timeout(Some(SPEECHD_REPLY))
+      .map_err(io_err)?;
+    stream
+      .set_write_timeout(Some(SPEECHD_REPLY))
+      .map_err(io_err)?;
+    let reader = BufReader::new(stream.try_clone().map_err(io_err)?);
+    let mut voice = Self {
+      writer: stream,
+      reader,
+      name: String::new(),
+    };
+
+    voice
+      .cmd("SET self CLIENT_NAME root:dory:main")
+      .map_err(io_err)?;
+    // speech-dispatcher answers "OK" to any module name: check the list.
+    let modules = voice.cmd("LIST OUTPUT_MODULES").map_err(io_err)?;
+    if !modules.iter().any(|m| reply_text(m) == "rhvoice") {
+      return Err("RHVoice is not installed".into());
+    }
+    voice
+      .cmd("SET self OUTPUT_MODULE rhvoice")
+      .map_err(io_err)?;
+    let voices = voice.cmd("LIST SYNTHESIS_VOICES").map_err(io_err)?;
+    voice.name = find_voice(&voices, VOICE).ok_or("the RHVoice slt voice is not installed")?;
+    let set = format!("SET self SYNTHESIS_VOICE {}", voice.name);
+    voice.cmd(&set).map_err(io_err)?;
+    Ok(voice)
+  }
+
+  /// Send one command; return the reply lines. Errors on a non-2xx reply.
+  fn cmd(&mut self, line: &str) -> io::Result<Vec<String>> {
+    self.writer.write_all(line.as_bytes())?;
+    self.writer.write_all(b"\r\n")?;
+    self.reply()
+  }
+
+  fn reply(&mut self) -> io::Result<Vec<String>> {
+    let mut lines = Vec::new();
+    loop {
+      let mut line = String::new();
+      if self.reader.read_line(&mut line)? == 0 {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "closed"));
+      }
+      let line = line.trim_end_matches(['\r', '\n']).to_string();
+      // "NNN-text" continues, "NNN text" ends the reply.
+      let last = line.as_bytes().get(3) == Some(&b' ');
+      let ok = line.starts_with('2');
+      lines.push(line);
+      if last {
+        return if ok {
+          Ok(lines)
+        } else {
+          Err(io::Error::other(lines.join(" | ")))
+        };
+      }
+    }
+  }
+
+  /// Replace whatever is being spoken with `latin1` (the bytes built for
+  /// `synth_direct`).
+  fn speak(&mut self, latin1: &[u8]) -> io::Result<()> {
+    self.cmd("CANCEL self")?;
+    self.cmd("SPEAK")?;
+    self.writer.write_all(ssip_message(latin1).as_bytes())?;
+    self.reply().map(|_| ())
+  }
+}
+
+fn speechd_conf(alsa_device: &str) -> String {
+  format!(
+    "# Private speech-dispatcher for the dory installer.
+AudioOutputMethod \"alsa\"
+AudioALSADevice \"{alsa_device}\"
+DefaultModule rhvoice
+DefaultLanguage \"en-US\"
+"
+  )
+}
+
+/// Text of a reply line: `250-rhvoice` -> `rhvoice`.
+fn reply_text(line: &str) -> &str {
+  line.get(4..).unwrap_or("")
+}
+
+/// The voice called `wanted` (any case) in a `LIST SYNTHESIS_VOICES` reply
+/// (`249-Slt\ten\tnone`), as speech-dispatcher spells it.
+fn find_voice(reply: &[String], wanted: &str) -> Option<String> {
+  reply.iter().find_map(|l| {
+    let name = reply_text(l).split('\t').next()?;
+    name.eq_ignore_ascii_case(wanted).then(|| name.to_string())
+  })
+}
+
+/// SSIP message body: UTF-8, one line, dot-stuffed, ending with `\r\n.\r\n`.
+fn ssip_message(latin1: &[u8]) -> String {
+  let text: String = latin1
+    .iter()
+    .map(|&b| char::from(b))
+    .map(|c| if c == '\r' || c == '\n' { ' ' } else { c })
+    .collect();
+  let text = text.trim();
+  let dot = if text.starts_with('.') { "." } else { "" };
+  format!("{dot}{text}\r\n.\r\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,6 +1259,45 @@ mod tests {
     edit_frame(&mut st, "a", 1, false);
     assert_eq!(edit_frame(&mut st, "a@", 2, false), "at");
     assert_eq!(edit_frame(&mut st, "a@,", 3, false), "comma");
+  }
+
+  #[test]
+  fn ssip_messages_are_utf8_single_line_and_dot_stuffed() {
+    assert_eq!(
+      ssip_message(b"S\xe3o Paulo, 1 of 2\n"),
+      "São Paulo, 1 of 2\r\n.\r\n"
+    );
+    assert_eq!(ssip_message(b".hidden file\n"), "..hidden file\r\n.\r\n");
+    assert_eq!(ssip_message(b"a\r\nb"), "a  b\r\n.\r\n");
+  }
+
+  #[test]
+  fn the_voice_is_found_whatever_its_case() {
+    let reply: Vec<String> = [
+      "249-Alan\ten\tnone",
+      "249-Slt\ten\tnone",
+      "249 OK VOICE LIST SENT",
+    ]
+    .map(String::from)
+    .into();
+    assert_eq!(find_voice(&reply, "slt").as_deref(), Some("Slt"));
+    assert_eq!(find_voice(&reply, "clb"), None);
+    assert_eq!(reply_text("250-rhvoice"), "rhvoice");
+  }
+
+  /// Needs speech-dispatcher with RHVoice and the slt voice installed;
+  /// plays to ALSA's `null` device. Run with `--ignored`.
+  #[test]
+  #[ignore]
+  fn the_natural_voice_speaks() {
+    let mut voice = Voice::start("null").expect("start");
+    assert!(voice.name.eq_ignore_ascii_case("slt"));
+    voice
+      .speak(b"Main Menu. Timezone, 2 of 12.\n")
+      .expect("speak");
+    voice
+      .speak(b"Replaced before it finished.\n")
+      .expect("interrupt");
   }
 
   #[test]
