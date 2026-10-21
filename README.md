@@ -77,6 +77,32 @@ entry) and with braille displays through brltty.
   Turning speakup back on with its own speech-kill key while Dory runs
   lasts only until Dory's next announcement.
 
+### After installation
+
+When Dory runs with speech on, the installed system speaks too (Athena Arch;
+Athena Nix does not yet):
+
+* **Text consoles** (boot, the Ly login, TTYs): `espeakup` is installed and
+  enabled. It runs as root before any user session, where ALSA's default
+  device is PipeWire, which is not running yet. So it gets its own `HOME`
+  (`/var/lib/espeakup`) whose `.asoundrc` sends it to the sound card used
+  during the installation, through dmix. Nothing else is affected. The card
+  levels from the live system are saved and restored at boot.
+* **Desktop**: Orca starts automatically after login. On GNOME, MATE and
+  Cinnamon through the `screen-reader-enabled` setting (default changed to on,
+  so Super+Alt+S still toggles it on GNOME); on KDE Plasma and XFCE through
+  `/etc/xdg/autostart/athena-orca.desktop`. Hyprland and Bspwm do not start it.
+* **Login screen**: Ly is a text login and is read by the console screen
+  reader. The graphical login screens are silent.
+
+Console and desktop speech never talk at the same time: speakup only speaks
+while a text console is in front. They share the sound card, which PipeWire
+releases a few seconds after the desktop goes quiet; while the desktop is
+playing sound, the console cannot speak.
+
+brltty (braille) is not installed: its udev rules take over common USB serial
+adapters (CH340/CH341).
+
 ## Roadmap
 
 Propose your ideas.

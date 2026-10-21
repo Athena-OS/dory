@@ -205,6 +205,16 @@ pub fn install_config(inputs: &[ConfigInput], log_path: &str) -> i32 {
   info!("Extra packages : {:?}", config.extra_packages);
   package_set.extend_into(&config.extra_packages);
 
+  /*    ACCESSIBILITY    */
+  info!("Speech on the installed system : {}", config.accessibility);
+  if config.accessibility {
+    if is_nix() {
+      warn!("Speech setup is not available on Athena Nix yet");
+    } else {
+      package_set.extend_into(accessibility::PACKAGES.iter().copied());
+    }
+  }
+
   /*         USERS         */
   let user_shells: Vec<Option<ShellSetup>> = config
     .users
@@ -293,6 +303,9 @@ pub fn install_config(inputs: &[ConfigInput], log_path: &str) -> i32 {
   if !is_nix() {
     info!("Enabling system services...");
     base::enable_system_services();
+    if config.accessibility {
+      accessibility::configure();
+    }
   }
 
   files::copy_multiple_files(

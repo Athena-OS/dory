@@ -173,6 +173,8 @@ impl Installer {
       "display_manager": self.display_manager.as_ref().map(|s| s.to_lowercase()),
       "users": self.users,
       "extra_packages": self.extra_packages,
+      // Installed with speech: the new system speaks too.
+      "accessibility": crate::a11y::speaking(),
     });
     let drv_cfg = self.drive_config.as_mut().map(|d| d.as_disko_cfg());
     json!({ "config": sys_config, "drives": drv_cfg })
@@ -861,6 +863,27 @@ impl ListKind {
     list_help(title, noun, blurb, self.searchable())
   }
 
+  /// Spoken once when the page opens during a spoken install: which choices
+  /// keep speech working on the installed system.
+  fn speech_note(self, installer: &Installer) -> Option<&'static str> {
+    let nix = installer.basesystem.as_deref() == Some("Athena Nix");
+    match self {
+      ListKind::BaseSys => Some(
+        "Note: speech on the installed system is set up on Athena Arch. \
+         Athena Nix does not speak after installation yet.",
+      ),
+      ListKind::DesktopEnvironment if !nix => Some(
+        "Note: the Orca screen reader starts automatically after login on GNOME, \
+         KDE Plasma, XFCE, Cinnamon and MATE. Hyprland and Bspwm do not start it.",
+      ),
+      ListKind::DisplayManager if !nix => Some(
+        "Note: only Ly, a text login, is read aloud. The other login screens are \
+         graphical and silent, and Orca starts after you log in.",
+      ),
+      _ => None,
+    }
+  }
+
   /// Store the chosen item.
   fn commit(self, installer: &mut Installer, item: &str) {
     let value = Some(item.to_string());
@@ -943,6 +966,9 @@ impl ListPage {
       search_bar.focus();
     } else {
       list.focus();
+    }
+    if let Some(note) = kind.speech_note(installer) {
+      crate::a11y::alert(|| note.to_string());
     }
     Self {
       kind,
@@ -2981,6 +3007,33 @@ mod a11y_tests {
     assert_eq!(
       crate::a11y::utterance_for_tests(),
       "Users. Name alice, Groups wheel"
+    );
+  }
+
+  #[test]
+  fn display_manager_page_explains_which_login_speaks_once() {
+    crate::a11y::enable_for_tests();
+    let mut installer = Installer::new();
+    installer.basesystem = Some("Athena Arch".into());
+    let mut page = ListPage::new(ListKind::DisplayManager, &installer);
+    let first = say_page(&mut page, &mut installer, 30);
+    assert!(first.ends_with("Orca starts after you log in."), "{first}");
+    assert!(
+      first.contains("Select Display Manager. Ly, 1 of"),
+      "{first}"
+    );
+    page.handle_input(&mut installer, key(KeyCode::Down));
+    let next = say_page(&mut page, &mut installer, 30);
+    assert!(!next.contains("Note:"), "said once: {next}");
+  }
+
+  #[test]
+  fn spoken_install_marks_the_config_for_speech() {
+    crate::a11y::enable_for_tests();
+    let mut installer = Installer::new();
+    assert_eq!(
+      installer.build_config_json()["config"]["accessibility"],
+      true
     );
   }
 

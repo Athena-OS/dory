@@ -111,6 +111,11 @@ pub struct Config {
   #[serde(default)]
   pub extra_packages: Vec<String>,
 
+  /// Installed with speech on: set up the console screen reader and Orca
+  /// on the new system.
+  #[serde(default)]
+  pub accessibility: bool,
+
   // ----- disk/partition config (second JSON, top-level) -----
   #[serde(flatten)]
   pub partition: Disk,

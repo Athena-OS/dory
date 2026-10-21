@@ -1,3 +1,4 @@
+pub mod accessibility;
 pub mod base;
 pub mod desktops;
 pub mod displaymanagers;
