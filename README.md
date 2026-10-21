@@ -63,8 +63,19 @@ entry) and with braille displays through brltty.
 
   speakup's own screen reading is switched off for Dory's console only, and
   restored when Dory exits, panics or is killed by `SIGTERM`, `SIGHUP`,
-  `SIGINT` or `SIGQUIT`. Run `dory --no-speech` to leave speakup alone; the
-  focus cursor still works.
+  `SIGINT` or `SIGQUIT`. If that happens while you are on another console,
+  it is restored as soon as you switch back. Run `dory --no-speech` to leave
+  speakup alone; the focus cursor still works.
+
+  Two cases cannot be caught: `SIGKILL`, and a hard crash such as an abort.
+  If speech stays silent after one of them, run:
+
+  ```bash
+  echo 6 | sudo tee /sys/accessibility/speakup/silent
+  ```
+
+  Turning speakup back on with its own speech-kill key while Dory runs
+  lasts only until Dory's next announcement.
 
 ## Roadmap
 

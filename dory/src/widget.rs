@@ -24,11 +24,12 @@ use crate::{a11y, installer::Signal};
 use serde_json::{Map, Value};
 use std::{collections::BTreeSet, fmt::Write as _};
 
-/// Column where centre-aligned single-line text of `len` chars starts
-/// (same arithmetic as ratatui's `Alignment::Center`).
+/// Column where centre-aligned single-line text of `len` chars starts:
+/// ratatui's `Alignment::Center` uses `width / 2 - len / 2`, which differs
+/// from `(width - len) / 2` for an even width and an odd length.
 fn centered_x(area: Rect, len: usize) -> u16 {
   let len = u16::try_from(len).unwrap_or(u16::MAX);
-  area.x + area.width.saturating_sub(len) / 2
+  area.x + (area.width / 2).saturating_sub(len / 2)
 }
 
 /// Package selection model: one immutable, sorted list of names plus index
@@ -1473,19 +1474,46 @@ impl ConfigWidget for TableWidget {
           return "empty".into();
         };
         let mut text = String::new();
-        for (header, field) in self.headers.iter().zip(row) {
-          let field = field.trim();
-          if field.is_empty() {
-            continue;
-          }
-          if !text.is_empty() {
-            text.push_str(", ");
-          }
-          let _ = write!(text, "{} {field}", header.trim());
-        }
+        self.describe_row(row, &mut text);
         let _ = write!(text, ", row {} of {}", idx + 1, self.rows.len());
         text
       });
+    } else {
+      // Shown for information (current drive layout, user list): read it as
+      // part of the page description.
+      a11y::context(|c| {
+        c.push_str(&self.title);
+        if self.rows.is_empty() {
+          c.push_str("\nempty");
+        }
+        for row in self.rows.iter().take(MAX_SPOKEN_ROWS) {
+          c.push('\n');
+          self.describe_row(row, c);
+        }
+        if self.rows.len() > MAX_SPOKEN_ROWS {
+          let _ = write!(c, "\nand {} more rows", self.rows.len() - MAX_SPOKEN_ROWS);
+        }
+      });
+    }
+  }
+}
+
+/// Rows of an unfocused table read as description; more is noise.
+const MAX_SPOKEN_ROWS: usize = 12;
+
+impl TableWidget {
+  /// "Header value, Header value" for the non-empty cells of `row`.
+  fn describe_row(&self, row: &[String], out: &mut String) {
+    let start = out.len();
+    for (header, field) in self.headers.iter().zip(row) {
+      let field = field.trim();
+      if field.is_empty() {
+        continue;
+      }
+      if out.len() > start {
+        out.push_str(", ");
+      }
+      let _ = write!(out, "{} {field}", header.trim());
     }
   }
 }
@@ -2070,7 +2098,7 @@ fn strip_log_prefix(line: &str) -> Line<'static> {
 
 /// `"[ INFO ] 12:34:56 msg"` -> `("INFO", "msg")`; `None` for lines the
 /// logger did not write (pacman output, step footers).
-fn split_log_prefix(line: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_log_prefix(line: &str) -> Option<(&str, &str)> {
   line.strip_prefix("[ ").and_then(|r| {
     let (level, rest) = r.split_once(" ] ")?;
     // 8-char timestamp followed by a space
@@ -2555,18 +2583,26 @@ mod tests {
     let (_, row) = draw_parked(30, 10, |f| t.render(f, f.area()));
     assert!(row.contains("sdc"), "cursor row: {row:?}");
 
-    let mut b = Button::new("Done");
-    b.focus();
-    let mut term = Terminal::new(TestBackend::new(20, 1)).unwrap();
-    term
-      .draw(|f| {
-        a11y::begin_frame();
-        b.render(f, f.area());
-      })
-      .unwrap();
-    a11y::end_frame(&mut term).unwrap();
-    let pos = term.get_cursor_position().unwrap();
-    assert_eq!(term.backend().buffer()[pos].symbol(), "D");
+    // Odd and even label lengths in even and odd widths.
+    for (label, width) in [("Done", 20), ("Yes", 20), ("Abort", 21), ("No", 7)] {
+      let mut b = Button::new(label);
+      b.focus();
+      let mut term = Terminal::new(TestBackend::new(width, 1)).unwrap();
+      term
+        .draw(|f| {
+          a11y::begin_frame();
+          b.render(f, f.area());
+        })
+        .unwrap();
+      a11y::end_frame(&mut term).unwrap();
+      let pos = term.get_cursor_position().unwrap();
+      let first = &label[..1];
+      assert_eq!(
+        term.backend().buffer()[pos].symbol(),
+        first,
+        "{label} in {width}"
+      );
+    }
   }
 
   #[test]

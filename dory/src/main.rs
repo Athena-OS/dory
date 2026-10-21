@@ -302,6 +302,7 @@ pub fn run_app(terminal: &mut Term, log_path: &Path) -> anyhow::Result<()> {
     terminal.draw(|f| {
       a11y::begin_frame();
       let body = render_header(f, "Install Athena OS");
+      a11y::default_cursor(body.x + 1, body.y + 1);
       if let Some(page) = page_stack.last_mut() {
         page.render(&mut installer, f, body);
       }
@@ -347,6 +348,7 @@ pub fn run_keymap_picker(terminal: &mut Term) -> anyhow::Result<Option<String>> 
     terminal.draw(|f| {
       a11y::begin_frame();
       let body = render_header(f, "Athena OS - Set Keyboard Layout");
+      a11y::default_cursor(body.x + 1, body.y + 1);
       page.render(&mut installer, f, body);
       a11y::capture(f.buffer_mut());
     })?;

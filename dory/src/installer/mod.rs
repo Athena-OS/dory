@@ -1812,6 +1812,9 @@ pub struct ConfigPreview {
   system_lines: Vec<Line<'static>>,
   partition_lines: Vec<Line<'static>>,
   scroll_position: usize,
+  /// Speech only: lines read below the top line once scrolling stops at the
+  /// end, so the last page can be read line by line too.
+  read_offset: usize,
   button_row: WidgetBox,
   current_view: ConfigView,
   help_modal: HelpModal<'static>,
@@ -1857,6 +1860,8 @@ impl ConfigPreview {
       ),
       _ => (Value::Null, Value::Null),
     };
+    let mut system_v = system_v;
+    mask_hashes(&mut system_v);
     let system_lines = Self::render_json(&system_v);
     let partition_lines = Self::render_json(&drives_v);
 
@@ -1885,11 +1890,31 @@ impl ConfigPreview {
       system_lines,
       partition_lines,
       scroll_position: 0,
+      read_offset: 0,
       button_row,
       current_view: ConfigView::System,
       help_modal,
       visible_lines: 10, // Default value, will be updated during rendering
     }
+  }
+}
+
+/// Password hashes carry nothing a reviewer can check, and must not be read
+/// aloud: show them as "(hidden)". Only the preview is masked, never the
+/// configuration handed to the backend.
+fn mask_hashes(v: &mut Value) {
+  match v {
+    Value::Object(map) => {
+      for (key, value) in map.iter_mut() {
+        if key.ends_with("_hash") && value.is_string() {
+          *value = Value::String("(hidden)".into());
+        } else {
+          mask_hashes(value);
+        }
+      }
+    }
+    Value::Array(items) => items.iter_mut().for_each(mask_hashes),
+    _ => {}
   }
 }
 
@@ -1962,25 +1987,23 @@ impl Page for ConfigPreview {
       .wrap(Wrap { trim: false });
     f.render_widget(config_paragraph, chunks[1]);
 
-    // Scrolling the preview reads it line by line, top visible line first.
+    // Scrolling the preview reads it line by line: the top visible line,
+    // then (speech only) the lines below it once the end is reached.
     if !self.button_row.is_focused() {
+      let read = start_line + self.read_offset.min(visible_lines.saturating_sub(1));
       let content = chunks[1];
-      if content.width > 2 && content.height > 2 {
-        crate::a11y::cursor(content.x + 1, content.y + 1);
+      let row = (read - start_line) as u16;
+      if content.width > 2 && row + 2 < content.height {
+        crate::a11y::cursor(content.x + 1, content.y + 1 + row);
       }
       let region = match self.current_view {
         ConfigView::System => "System configuration preview",
         ConfigView::Partitioning => "Partition configuration preview",
       };
-      crate::a11y::focus(region, || match lines.get(start_line) {
+      crate::a11y::focus(region, || match lines.get(read) {
         Some(line) => {
           let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-          format!(
-            "{}, line {} of {}",
-            text.trim(),
-            start_line + 1,
-            lines.len()
-          )
+          format!("{}, line {} of {}", text.trim(), read + 1, lines.len())
         }
         None => "empty".into(),
       });
@@ -2008,12 +2031,14 @@ impl Page for ConfigPreview {
         self.button_row.unfocus();
         self.current_view = ConfigView::System;
         self.scroll_position = 0;
+        self.read_offset = 0;
         Signal::Wait
       }
       KeyCode::Char('2') => {
         self.button_row.unfocus();
         self.current_view = ConfigView::Partitioning;
         self.scroll_position = 0;
+        self.read_offset = 0;
         Signal::Wait
       }
       ui_up!() => {
@@ -2021,6 +2046,8 @@ impl Page for ConfigPreview {
           if !self.button_row.prev_child() {
             self.button_row.unfocus();
           }
+        } else if self.read_offset > 0 {
+          self.read_offset -= 1;
         } else if self.scroll_position > 0 {
           self.scroll_position -= 1;
         }
@@ -2031,8 +2058,11 @@ impl Page for ConfigPreview {
           self.button_row.next_child();
         } else {
           let max_scroll = self.get_max_scroll(self.visible_lines);
+          let last = self.current_lines().len().saturating_sub(1);
           if self.scroll_position < max_scroll {
             self.scroll_position += 1;
+          } else if crate::a11y::speaking() && self.scroll_position + self.read_offset < last {
+            self.read_offset += 1;
           } else if !self.button_row.is_focused() {
             self.button_row.focus();
           }
@@ -2047,9 +2077,11 @@ impl Page for ConfigPreview {
         } else if self.current_view == ConfigView::System {
           self.current_view = ConfigView::Partitioning;
           self.scroll_position = 0;
+          self.read_offset = 0;
         } else if self.current_view == ConfigView::Partitioning {
           self.current_view = ConfigView::System;
           self.scroll_position = 0;
+          self.read_offset = 0;
         }
 
         Signal::Wait
@@ -2062,20 +2094,24 @@ impl Page for ConfigPreview {
         } else if self.current_view == ConfigView::Partitioning {
           self.current_view = ConfigView::System;
           self.scroll_position = 0;
+          self.read_offset = 0;
         } else if self.current_view == ConfigView::System {
           self.current_view = ConfigView::Partitioning;
           self.scroll_position = 0;
+          self.read_offset = 0;
         }
 
         Signal::Wait
       }
       KeyCode::PageUp => {
         self.scroll_position = self.scroll_position.saturating_sub(10);
+        self.read_offset = 0;
         Signal::Wait
       }
       KeyCode::PageDown => {
         let max_scroll = self.get_max_scroll(self.visible_lines);
         self.scroll_position = std::cmp::min(self.scroll_position + 10, max_scroll);
+        self.read_offset = 0;
         Signal::Wait
       }
       KeyCode::Tab => {
@@ -2624,6 +2660,8 @@ impl Page for InstallComplete {
 
 pub struct InstallFailed {
   log_path: PathBuf,
+  /// Last errors the backend logged: the actual cause, shown up front.
+  errors: Vec<String>,
   state: LogGenState,
   rx: Option<Receiver<Result<String, String>>>,
 }
@@ -2651,13 +2689,40 @@ fn redact_log(contents: &str) -> String {
     .join("\n")
 }
 
+/// Errors shown on the failure page.
+const SHOWN_ERRORS: usize = 3;
+
 impl InstallFailed {
   pub fn new(log_path: PathBuf) -> Self {
+    let errors = Self::last_errors(&log_path);
     Self {
       log_path,
+      errors,
       state: LogGenState::Idle,
       rx: None,
     }
+  }
+
+  /// The last `[ ERROR ]` records of the install log, read once.
+  fn last_errors(log_path: &Path) -> Vec<String> {
+    use std::io::BufRead;
+    let Ok(file) = std::fs::File::open(log_path) else {
+      return Vec::new();
+    };
+    let mut last = VecDeque::with_capacity(SHOWN_ERRORS + 1);
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+      if !line.starts_with("[ ERROR ]") {
+        continue;
+      }
+      let line = strip_ansi_escapes::strip_str(&line);
+      if let Some(("ERROR", msg)) = crate::widget::split_log_prefix(&line) {
+        last.push_back(msg.trim().to_string());
+        if last.len() > SHOWN_ERRORS {
+          last.pop_front();
+        }
+      }
+    }
+    last.into()
   }
 
   fn start_generation(&mut self) {
@@ -2718,21 +2783,35 @@ impl InstallFailed {
       help_line("Enter", " - Exit installer"),
     ];
     let mut lines: Vec<StyledLine> = match &self.state {
-      LogGenState::Idle => vec![
-        vec![(None, "Athena OS installation FAILED.".into())],
-        vec![(
+      LogGenState::Idle => {
+        let mut lines = vec![vec![(None, "Athena OS installation FAILED.".into())]];
+        if !self.errors.is_empty() {
+          lines.push(vec![(None, String::new())]);
+          lines.push(vec![(None, "Last errors:".into())]);
+          lines.extend(
+            self
+              .errors
+              .iter()
+              .map(|e| vec![(Some((Color::Red, Modifier::BOLD)), e.clone())]),
+          );
+          lines.push(vec![(None, String::new())]);
+        }
+        lines.extend([vec![(
           None,
           format!("The full log is in {}.", self.log_path.display()),
-        )],
-        vec![(None, String::new())],
-        vec![
-          (KEY, "Press 'G'".into()),
-          (
-            None,
-            " to upload the log to termbin.com and get a shareable link.".into(),
-          ),
-        ],
-      ],
+        )]]);
+        lines.extend([
+          vec![(None, String::new())],
+          vec![
+            (KEY, "Press 'G'".into()),
+            (
+              None,
+              " to upload the log to termbin.com and get a shareable link.".into(),
+            ),
+          ],
+        ]);
+        lines
+      }
       LogGenState::Confirm => vec![
         vec![(
           Some((Color::Red, Modifier::BOLD)),
@@ -2816,6 +2895,93 @@ mod a11y_tests {
 
   fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
+  }
+
+  fn say_page(page: &mut dyn Page, installer: &mut Installer, h: u16) -> String {
+    let mut term = Terminal::new(TestBackend::new(100, h)).unwrap();
+    term
+      .draw(|f| {
+        crate::a11y::begin_frame();
+        page.render(installer, f, f.area());
+      })
+      .unwrap();
+    crate::a11y::utterance_for_tests()
+  }
+
+  #[test]
+  fn config_preview_reads_to_the_last_line_and_never_a_hash() {
+    crate::a11y::enable_for_tests();
+    let mut installer = Installer::new();
+    installer.hostname = Some("athena".into());
+    installer.root_passwd_hash = Some("$6$salt$secrethash".into());
+    let mut page = ConfigPreview::new(&mut installer);
+    let total = page.system_lines.len();
+    let mut said = say_page(&mut page, &mut installer, 14);
+    for _ in 0..total + 5 {
+      page.handle_input(&mut installer, key(KeyCode::Down));
+      said.push_str(&say_page(&mut page, &mut installer, 14));
+      said.push('|');
+    }
+    assert!(
+      said.contains(&format!("line {total} of {total}")),
+      "last line reached: {said}"
+    );
+    assert!(said.contains("Begin Installation, button"), "{said}");
+    assert!(
+      !said.contains("secrethash") && said.contains("(hidden)"),
+      "{said}"
+    );
+    // The configuration handed to the backend still has the hash.
+    assert!(
+      installer
+        .build_config_json()
+        .to_string()
+        .contains("secrethash")
+    );
+  }
+
+  #[test]
+  fn failed_install_shows_and_speaks_the_last_errors() {
+    crate::a11y::enable_for_tests();
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("dory.log");
+    std::fs::write(
+      &log,
+      "[ INFO ] 10:00:00 Partitioning\n\
+       [ ERROR ] 10:00:01 first\n\
+       pacman noise\n\
+       [ ERROR ] 10:00:02 Package installation failed with exit code 1\n",
+    )
+    .unwrap();
+    let mut page = InstallFailed::new(log);
+    let said = say_page(&mut page, &mut Installer::new(), 20);
+    assert!(
+      said.contains("Last errors: first. Package installation failed with exit code 1"),
+      "{said}"
+    );
+  }
+
+  #[test]
+  fn unfocused_tables_are_read_as_description() {
+    crate::a11y::enable_for_tests();
+    let mut t = crate::widget::TableWidget::new(
+      "Users",
+      vec![Constraint::Length(10), Constraint::Length(10)],
+      vec!["Name".into(), "Groups".into()],
+      vec![vec!["alice".into(), "wheel".into()]],
+    );
+    t.unfocus();
+    let mut term = Terminal::new(TestBackend::new(40, 8)).unwrap();
+    term
+      .draw(|f| {
+        crate::a11y::begin_frame();
+        t.render(f, f.area());
+      })
+      .unwrap();
+    assert_eq!(
+      crate::a11y::utterance_for_tests(),
+      "Users. Name alice, Groups wheel"
+    );
   }
 
   #[test]

@@ -55,8 +55,15 @@ const ACTIVE_VT: &str = "/sys/class/tty/tty0/active";
 const MUTE_AND_FLUSH: &[u8] = b"7";
 /// `silent`: clear kill + shut-up bits and flush queued speech.
 const UNMUTE_AND_FLUSH: &[u8] = b"6";
-/// `synth_direct` stores at most a page; stay well below it.
+/// Normal utterances: a sentence or a few, never a wall of text.
 const MAX_UTTERANCE: usize = 1500;
+/// F3 (read the screen). speakup's buffer holds 8192 characters and stalls
+/// console output when nearly full, so keep a margin.
+const MAX_SCREEN: usize = 6000;
+/// `synth_direct` stores at most a page per write.
+const MAX_WRITE: usize = 3500;
+/// Errors/warnings queued per frame; the rest are counted.
+const MAX_URGENT: usize = 3;
 /// Installation milestones are spoken at most this often (errors always).
 const INFO_INTERVAL: Duration = Duration::from_secs(3);
 /// After this long without speech during long work (package downloads write
@@ -123,8 +130,29 @@ impl Speaker {
     if interrupt {
       self.silent(MUTE_AND_FLUSH);
     }
-    let _ = self.direct.write_at(text, 0);
+    for chunk in chunks(text, MAX_WRITE) {
+      let _ = self.direct.write_at(chunk, 0);
+    }
   }
+}
+
+/// Split at spaces into pieces of at most `max` bytes.
+fn chunks(mut text: &[u8], max: usize) -> impl Iterator<Item = &[u8]> {
+  std::iter::from_fn(move || {
+    if text.is_empty() {
+      return None;
+    }
+    let mut end = text.len().min(max);
+    if end < text.len()
+      && let Some(space) = text[..end].iter().rposition(|&b| b == b' ')
+      && space > 0
+    {
+      end = space + 1;
+    }
+    let (head, tail) = text.split_at(end);
+    text = tail;
+    Some(head)
+  })
 }
 
 /// `/dev/ttyN` on stdin, as `ttyN`. speakup only reads virtual consoles.
@@ -165,10 +193,11 @@ pub fn init(disabled: bool) -> Option<Session> {
     debug!("a11y: speakup not active on this console, speech off");
     return None;
   };
-  speaker.silent(MUTE_AND_FLUSH);
   let speaker = SPEAKER.get_or_init(|| speaker);
-  SPEAKING.store(true, Ordering::SeqCst);
+  // Handlers first: from the moment speakup is muted, every way out unmutes.
   restore_on_signal();
+  SPEAKING.store(true, Ordering::SeqCst);
+  speaker.silent(MUTE_AND_FLUSH);
   debug!("a11y: speech on ({})", speaker.vt);
   Some(Session(()))
 }
@@ -179,8 +208,32 @@ pub fn shutdown() {
   if SPEAKING.swap(false, Ordering::SeqCst)
     && let Some(speaker) = SPEAKER.get()
   {
-    speaker.silent(UNMUTE_AND_FLUSH);
+    if speaker.foreground() {
+      speaker.silent(UNMUTE_AND_FLUSH);
+    } else {
+      // `silent` would hit the console the user is on, and ours would stay
+      // muted. Leave a watcher that unmutes ours when the user returns.
+      unmute_when_back(&speaker.vt);
+    }
   }
+}
+
+/// Detached shell loop: survives our exit (own process group, so no SIGHUP
+/// from the console) and gives up after an hour.
+fn unmute_when_back(vt: &str) {
+  use std::os::unix::process::CommandExt;
+  let script = format!(
+    "i=0; while [ $i -lt 3600 ]; do \
+       if [ \"$(cat {ACTIVE_VT})\" = {vt} ]; then echo 6 > {SPEAKUP}/silent; exit 0; fi; \
+       i=$((i+1)); sleep 1; done"
+  );
+  let _ = std::process::Command::new("/bin/sh")
+    .args(["-c", &script])
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .process_group(0)
+    .spawn();
 }
 
 /// Fatal signals would otherwise leave speakup muted on this console, i.e. a
@@ -228,6 +281,8 @@ struct Edit {
 #[derive(Default)]
 struct Frame {
   cursor: Option<Position>,
+  /// Where to park the cursor when nothing on the page has focus.
+  default_cursor: Option<Position>,
   focus: Option<Focus>,
   /// Visible descriptive text, '\n'-separated, in render order.
   context: String,
@@ -256,7 +311,10 @@ struct State {
   info_at: Option<Instant>,
   /// Errors and warnings, always spoken, in order.
   urgent: Vec<String>,
+  urgent_dropped: usize,
   last_spoken: Option<Instant>,
+  /// Our console was in the background on the last frame.
+  away: bool,
 }
 
 impl State {
@@ -272,7 +330,9 @@ impl State {
       info: None,
       info_at: None,
       urgent: Vec::new(),
+      urgent_dropped: 0,
       last_spoken: None,
+      away: false,
     }
   }
 }
@@ -286,6 +346,7 @@ pub fn begin_frame() {
   STATE.with_borrow_mut(|st| {
     let f = &mut st.frame;
     f.cursor = None;
+    f.default_cursor = None;
     f.focus = None;
     f.context.clear();
     f.modal = None;
@@ -297,6 +358,13 @@ pub fn begin_frame() {
 /// take the cursor. Always active (cursor-following readers, brltty).
 pub fn cursor(x: u16, y: u16) {
   STATE.with_borrow_mut(|st| st.frame.cursor = Some(Position { x, y }));
+}
+
+/// Fallback cursor position (start of the page content), used when no
+/// widget reports focus: braille displays then show the page, not a stray
+/// line.
+pub fn default_cursor(x: u16, y: u16) {
+  STATE.with_borrow_mut(|st| st.frame.default_cursor = Some(Position { x, y }));
 }
 
 /// The focused item. `text` is only evaluated while speech is on.
@@ -325,6 +393,7 @@ pub fn edit(region: &str, value: &[char], cursor: usize, secret: bool, placehold
       Some(p) if !p.is_empty() => format!("blank, {p}"),
       _ => "blank".to_owned(),
     },
+    (false, true) if value.len() == 1 => "1 hidden character".to_owned(),
     (false, true) => format!("{} hidden characters", value.len()),
     (false, false) => value.iter().collect(),
   };
@@ -347,12 +416,18 @@ pub fn context(write: impl FnOnce(&mut String)) {
   if !speaking() {
     return;
   }
+  // Built outside the borrow: `write` may itself call into this module.
+  let mut part = String::new();
+  write(&mut part);
+  if part.is_empty() {
+    return;
+  }
   STATE.with_borrow_mut(|st| {
     let ctx = &mut st.frame.context;
     if !ctx.is_empty() {
       ctx.push('\n');
     }
-    write(ctx);
+    ctx.push_str(&part);
   });
 }
 
@@ -386,8 +461,33 @@ pub fn busy(status: impl FnOnce() -> String) {
   if !speaking() {
     return;
   }
-  let status = status();
+  let status = strip_bars(&status());
   STATE.with_borrow_mut(|st| st.frame.busy = Some(status));
+}
+
+/// Drop `[#####-----]`-style bars: espeak would read every `#` and `-`.
+fn strip_bars(line: &str) -> String {
+  let mut out = String::with_capacity(line.len());
+  let mut rest = line;
+  while let Some(open) = rest.find('[') {
+    let Some(len) = rest[open..].find(']') else {
+      break;
+    };
+    let inner = &rest[open + 1..open + len];
+    out.push_str(&rest[..open]);
+    if !inner.chars().all(|c| "#-=>.~*|ocC ".contains(c)) {
+      out.push_str(&rest[open..=open + len]);
+    }
+    rest = &rest[open + len + 1..];
+  }
+  out.push_str(rest);
+  // Bare bars too ("checking keys ##########  100%").
+  let bar = |w: &str| w.len() >= 3 && w.chars().all(|c| "#-=".contains(c));
+  out
+    .split_whitespace()
+    .filter(|w| !bar(w))
+    .collect::<Vec<_>>()
+    .join(" ")
 }
 
 /// A structured backend log record (`[ LEVEL ] time message`).
@@ -395,11 +495,21 @@ pub fn progress(level: &str, msg: &str) {
   if !speaking() || msg.trim().is_empty() {
     return;
   }
-  STATE.with_borrow_mut(|st| match level {
-    "ERROR" => st.urgent.push(format!("Error: {msg}")),
-    "WARN" => st.urgent.push(format!("Warning: {msg}")),
-    "INFO" => st.info = Some(msg.to_owned()),
-    _ => {}
+  let urgent = match level {
+    "ERROR" => "Error",
+    "WARN" => "Warning",
+    "INFO" => {
+      STATE.with_borrow_mut(|st| st.info = Some(msg.to_owned()));
+      return;
+    }
+    _ => return,
+  };
+  STATE.with_borrow_mut(|st| {
+    if st.urgent.len() < MAX_URGENT {
+      st.urgent.push(format!("{urgent}: {msg}"));
+    } else {
+      st.urgent_dropped += 1;
+    }
   });
 }
 
@@ -466,9 +576,24 @@ pub fn capture(buf: &Buffer) {
 /// Park the cursor on the focused element and speak what changed. Call right
 /// after `terminal.draw`.
 pub fn end_frame<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error> {
+  let speaking = speaking();
+  // Only speak while our console is in front; when it comes back, start
+  // with a full announcement of where the user is.
+  let foreground = speaking && SPEAKER.get().is_none_or(Speaker::foreground);
   let (cursor, speech) = STATE.with_borrow_mut(|st| {
-    let cursor = st.frame.cursor;
-    (cursor, speaking().then(|| st.compose(Instant::now())))
+    let cursor = st.frame.cursor.or(st.frame.default_cursor);
+    let speech = if !speaking {
+      None
+    } else if !foreground {
+      st.away = true;
+      None
+    } else {
+      if std::mem::take(&mut st.away) {
+        st.repeat = true;
+      }
+      Some(st.compose(Instant::now()))
+    };
+    (cursor, speech)
   });
   if let Some(pos) = cursor {
     terminal.set_cursor_position(pos)?;
@@ -510,6 +635,7 @@ impl State {
     let seen = &mut self.seen;
 
     if let Some(screen) = self.screen.take() {
+      out.limit = MAX_SCREEN;
       out.text(&screen);
     } else if let Some(modal) = &frame.modal {
       if repeat || seen.modal.as_ref() != Some(modal) {
@@ -550,6 +676,15 @@ impl State {
     }
     for msg in self.urgent.drain(..) {
       utterances.queued.extend(Speech::once(&msg));
+    }
+    match std::mem::take(&mut self.urgent_dropped) {
+      0 => {}
+      1 => utterances
+        .queued
+        .extend(Speech::once("1 more message in the log")),
+      n => utterances
+        .queued
+        .extend(Speech::once(&format!("{n} more messages in the log"))),
     }
     if self.info.is_some()
       && self
@@ -600,37 +735,89 @@ fn describe_change(now: &Focus, prev: Option<&Focus>, out: &mut Speech) {
         None => out.text("end"),
       }
     }
-  } else if e.value.len() == p.value.len() + 1 && e.cursor == p.cursor + 1 {
-    out.text(&name(e.value[p.cursor])); // typed
-  } else if e.value.len() + 1 == p.value.len() && e.cursor + 1 == p.cursor {
-    out.text(&name(p.value[e.cursor])); // backspace
-  } else if e.value.len() + 1 == p.value.len() && e.cursor == p.cursor {
-    out.text(&name(p.value[p.cursor])); // delete
   } else {
-    out.text(&now.text);
+    let typed = e.value.len() == p.value.len() + 1 && e.cursor == p.cursor + 1;
+    let erased = e.value.len() + 1 == p.value.len();
+    let changed = if typed {
+      e.value.get(p.cursor)
+    } else if erased && e.cursor + 1 == p.cursor {
+      p.value.get(e.cursor) // backspace
+    } else if erased && e.cursor == p.cursor {
+      p.value.get(p.cursor) // delete
+    } else {
+      None
+    };
+    match changed {
+      Some(&c) => out.text(&name(c)),
+      None => out.text(&now.text),
+    }
   }
 }
 
+/// Name for an echoed character. espeak skips most lone punctuation, and
+/// characters beyond Latin-1 cannot go through `synth_direct` at all.
 fn char_name(c: char) -> String {
-  match c {
-    ' ' => "space".into(),
-    '_' => "underscore".into(),
-    '\\' => "backslash".into(),
-    '.' => "dot".into(),
-    '-' => "dash".into(),
-    '/' => "slash".into(),
-    c => c.to_string(),
-  }
+  let name = match c {
+    ' ' => "space",
+    '_' => "underscore",
+    '\\' => "backslash",
+    '.' => "dot",
+    ',' => "comma",
+    ';' => "semicolon",
+    ':' => "colon",
+    '-' => "dash",
+    '/' => "slash",
+    '@' => "at",
+    '#' => "hash",
+    '!' => "exclamation",
+    '?' => "question",
+    '"' => "quote",
+    '\'' => "apostrophe",
+    '`' => "backtick",
+    '(' => "left paren",
+    ')' => "right paren",
+    '[' => "left bracket",
+    ']' => "right bracket",
+    '{' => "left brace",
+    '}' => "right brace",
+    '<' => "less than",
+    '>' => "greater than",
+    '*' => "star",
+    '+' => "plus",
+    '=' => "equals",
+    '&' => "and",
+    '%' => "percent",
+    '$' => "dollar",
+    '^' => "caret",
+    '~' => "tilde",
+    '|' => "bar",
+    c if u32::from(c) > 0xff => "symbol",
+    c => return c.to_string(),
+  };
+  name.to_owned()
 }
 
 /// Builder for one utterance in the bytes `synth_direct` expects.
-#[derive(Default)]
 struct Speech {
   out: Vec<u8>,
   /// A space is owed before the next visible byte.
   space: bool,
   /// A sentence break is owed before the next visible byte.
   stop: bool,
+  limit: usize,
+  truncated: bool,
+}
+
+impl Default for Speech {
+  fn default() -> Self {
+    Self {
+      out: Vec::new(),
+      space: false,
+      stop: false,
+      limit: MAX_UTTERANCE,
+      truncated: false,
+    }
+  }
 }
 
 impl Speech {
@@ -694,7 +881,8 @@ impl Speech {
 
   fn raw(&mut self, b: u8) {
     // Room for a ". " separator plus the byte itself.
-    if self.out.len() + 3 > MAX_UTTERANCE {
+    if self.out.len() + 3 > self.limit {
+      self.truncated = true;
       return;
     }
     if !self.out.is_empty() {
@@ -716,6 +904,13 @@ impl Speech {
   fn finish(mut self) -> Option<Vec<u8>> {
     if self.out.is_empty() {
       return None;
+    }
+    if self.truncated {
+      // Cut at the last whole word, and say so.
+      if let Some(space) = self.out.iter().rposition(|&b| b == b' ') {
+        self.out.truncate(space);
+      }
+      self.out.extend_from_slice(b". The rest was not read.");
     }
     self.out.push(b'\n');
     Some(self.out)
@@ -825,7 +1020,9 @@ mod tests {
   #[test]
   fn speech_is_bounded() {
     let long = "word ".repeat(1000);
-    assert!(Speech::once(&long).unwrap().len() <= MAX_UTTERANCE + 1);
+    let said = Speech::once(&long).unwrap();
+    assert!(said.len() <= MAX_UTTERANCE + 30, "{}", said.len());
+    assert!(said.ends_with(b"The rest was not read.\n"));
   }
 
   #[test]
@@ -946,6 +1143,57 @@ mod tests {
     );
     // The heartbeat counts as speech: the next one waits another interval.
     assert!(busy(&mut st, t0 + BUSY_INTERVAL + Duration::from_secs(5), "x").is_empty());
+  }
+
+  #[test]
+  fn screen_reading_is_long_but_bounded_and_says_when_cut() {
+    let mut st = state();
+    st.screen = Some("word ".repeat(2000));
+    let main = st.compose(Instant::now()).interrupt.unwrap();
+    assert!(main.len() > MAX_UTTERANCE && main.len() <= MAX_SCREEN + 30);
+    assert!(main.ends_with(b"The rest was not read.\n"));
+    let pieces: Vec<_> = chunks(&main, MAX_WRITE).collect();
+    assert!(pieces.len() >= 2 && pieces.iter().all(|p| p.len() <= MAX_WRITE));
+    assert_eq!(pieces.concat(), main);
+  }
+
+  #[test]
+  fn error_bursts_are_capped() {
+    let mut st = state();
+    for i in 0..10 {
+      if st.urgent.len() < MAX_URGENT {
+        st.urgent.push(format!("Warning: w{i}"));
+      } else {
+        st.urgent_dropped += 1;
+      }
+    }
+    let q = st.compose(Instant::now()).queued;
+    assert_eq!(q.len(), MAX_URGENT + 1);
+    assert_eq!(q.last().unwrap(), b"7 more messages in the log\n");
+  }
+
+  #[test]
+  fn progress_bars_are_not_read() {
+    assert_eq!(
+      strip_bars("(12/40) installing linux   [#####-----]  40%"),
+      "(12/40) installing linux 40%"
+    );
+    assert_eq!(strip_bars("keep [this] text"), "keep [this] text");
+    assert_eq!(
+      strip_bars("(841/841) checking keys ############## 100%"),
+      "(841/841) checking keys 100%"
+    );
+    assert_eq!(strip_bars("pacman  [--C o o]  12%"), "pacman 12%");
+    assert_eq!(strip_bars("a - b"), "a - b");
+    assert_eq!(strip_bars("open [### only"), "open [### only");
+  }
+
+  #[test]
+  fn punctuation_is_named_when_typed() {
+    let mut st = state();
+    edit_frame(&mut st, "a", 1, false);
+    assert_eq!(edit_frame(&mut st, "a@", 2, false), "at");
+    assert_eq!(edit_frame(&mut st, "a@,", 3, false), "comma");
   }
 
   #[test]
