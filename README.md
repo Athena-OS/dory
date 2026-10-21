@@ -50,10 +50,10 @@ entry) and with braille displays through brltty.
   * typed and deleted characters in text fields. Password fields say "star"
     and never reveal their content;
   * help popups when they open, and why an action was refused;
-  * installation milestones from the backend log, at most one every few
-    seconds, plus every warning and error. Package manager output and
-    progress bars are not spoken; after 45 seconds of silence a "Still
-    working" message reads the current progress line instead.
+  * during the installation, only the Install Steps box as each step changes
+    state, then the result: success, or failure with the last errors. The
+    installation log is shown on screen but never spoken; F2 repeats the
+    current step.
 
   | Key | Action |
   |---|---|

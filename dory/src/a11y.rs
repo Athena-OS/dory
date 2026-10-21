@@ -12,9 +12,10 @@
 //!   speakup reads every byte a full-screen redraw writes, which turns a TUI
 //!   into noise: diff fragments, spinners, log scrolling. While the installer
 //!   runs it switches speakup's screen reading off for its own console and
-//!   speaks itself through `synth_direct`: the focused item, what changed,
-//!   help popups and installation milestones. speakup is restored on exit,
-//!   on panic and on fatal signals.
+//!   speaks itself through `synth_direct`: the focused item, what changed and
+//!   help popups. The installation log is never spoken, only the install
+//!   steps and the result page. speakup is restored on exit, on panic and on
+//!   fatal signals.
 //!
 //! speakup interface (drivers/accessibility/speakup):
 //! * `silent` acts on the foreground console. Bit 1 sets/clears, bit 2
@@ -36,7 +37,6 @@ use std::{
     OnceLock,
     atomic::{AtomicBool, Ordering},
   },
-  time::{Duration, Instant},
 };
 
 use log::info;
@@ -62,13 +62,6 @@ const MAX_UTTERANCE: usize = 1500;
 const MAX_SCREEN: usize = 6000;
 /// `synth_direct` stores at most a page per write.
 const MAX_WRITE: usize = 3500;
-/// Errors/warnings queued per frame; the rest are counted.
-const MAX_URGENT: usize = 3;
-/// Installation milestones are spoken at most this often (errors always).
-const INFO_INTERVAL: Duration = Duration::from_secs(3);
-/// After this long without speech during long work (package downloads write
-/// no milestones for minutes), say what is going on.
-const BUSY_INTERVAL: Duration = Duration::from_secs(45);
 const GREETING: &str = "Athena OS installer. Speech is on. \
   F2 repeats, F3 reads the whole screen, question mark opens help.";
 
@@ -130,13 +123,12 @@ impl Speaker {
     let _ = self.silent.write_at(value, 0);
   }
 
-  fn say(&self, text: &[u8], interrupt: bool) {
+  /// Replace whatever is being spoken with `text`.
+  fn say(&self, text: &[u8]) {
     if text.is_empty() || !self.foreground() {
       return;
     }
-    if interrupt {
-      self.silent(MUTE_AND_FLUSH);
-    }
+    self.silent(MUTE_AND_FLUSH);
     for chunk in chunks(text, MAX_WRITE) {
       let _ = self.direct.write_at(chunk, 0);
     }
@@ -330,8 +322,6 @@ struct Frame {
   /// Visible descriptive text, '\n'-separated, in render order.
   context: String,
   modal: Option<String>,
-  /// Long-running work: what it is doing right now.
-  busy: Option<String>,
 }
 
 #[derive(Default)]
@@ -349,13 +339,6 @@ struct State {
   read_screen: bool,
   screen: Option<String>,
   alert: Option<String>,
-  /// Latest installation milestone not spoken yet.
-  info: Option<String>,
-  info_at: Option<Instant>,
-  /// Errors and warnings, always spoken, in order.
-  urgent: Vec<String>,
-  urgent_dropped: usize,
-  last_spoken: Option<Instant>,
   /// Our console was in the background on the last frame.
   away: bool,
 }
@@ -370,11 +353,6 @@ impl State {
       read_screen: false,
       screen: None,
       alert: None,
-      info: None,
-      info_at: None,
-      urgent: Vec::new(),
-      urgent_dropped: 0,
-      last_spoken: None,
       away: false,
     }
   }
@@ -393,7 +371,6 @@ pub fn begin_frame() {
     f.focus = None;
     f.context.clear();
     f.modal = None;
-    f.busy = None;
   });
 }
 
@@ -498,64 +475,6 @@ pub fn alert(text: impl FnOnce() -> String) {
   STATE.with_borrow_mut(|st| st.alert = Some(text));
 }
 
-/// Long-running work is visible; `status` (its latest output line) is only
-/// evaluated while speech is on.
-pub fn busy(status: impl FnOnce() -> String) {
-  if !speaking() {
-    return;
-  }
-  let status = strip_bars(&status());
-  STATE.with_borrow_mut(|st| st.frame.busy = Some(status));
-}
-
-/// Drop `[#####-----]`-style bars: espeak would read every `#` and `-`.
-fn strip_bars(line: &str) -> String {
-  let mut out = String::with_capacity(line.len());
-  let mut rest = line;
-  while let Some(open) = rest.find('[') {
-    let Some(len) = rest[open..].find(']') else {
-      break;
-    };
-    let inner = &rest[open + 1..open + len];
-    out.push_str(&rest[..open]);
-    if !inner.chars().all(|c| "#-=>.~*|ocC ".contains(c)) {
-      out.push_str(&rest[open..=open + len]);
-    }
-    rest = &rest[open + len + 1..];
-  }
-  out.push_str(rest);
-  // Bare bars too ("checking keys ##########  100%").
-  let bar = |w: &str| w.len() >= 3 && w.chars().all(|c| "#-=".contains(c));
-  out
-    .split_whitespace()
-    .filter(|w| !bar(w))
-    .collect::<Vec<_>>()
-    .join(" ")
-}
-
-/// A structured backend log record (`[ LEVEL ] time message`).
-pub fn progress(level: &str, msg: &str) {
-  if !speaking() || msg.trim().is_empty() {
-    return;
-  }
-  let urgent = match level {
-    "ERROR" => "Error",
-    "WARN" => "Warning",
-    "INFO" => {
-      STATE.with_borrow_mut(|st| st.info = Some(msg.to_owned()));
-      return;
-    }
-    _ => return,
-  };
-  STATE.with_borrow_mut(|st| {
-    if st.urgent.len() < MAX_URGENT {
-      st.urgent.push(format!("{urgent}: {msg}"));
-    } else {
-      st.urgent_dropped += 1;
-    }
-  });
-}
-
 fn push_lines(out: &mut String, title: &str, lines: &[Line]) {
   let title = title.trim();
   if !title.is_empty() {
@@ -634,22 +553,17 @@ pub fn end_frame<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error>
       if std::mem::take(&mut st.away) {
         st.repeat = true;
       }
-      Some(st.compose(Instant::now()))
+      st.compose()
     };
     (cursor, speech)
   });
   if let Some(pos) = cursor {
     terminal.set_cursor_position(pos)?;
   }
-  if let Some(utterances) = speech
+  if let Some(text) = speech
     && let Some(speaker) = SPEAKER.get()
   {
-    if let Some(main) = &utterances.interrupt {
-      speaker.say(main, true);
-    }
-    for queued in &utterances.queued {
-      speaker.say(queued, false);
-    }
+    speaker.say(&text);
   }
   Ok(())
 }
@@ -658,16 +572,9 @@ pub fn end_frame<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), B::Error>
 // What to say
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Default)]
-struct Utterances {
-  /// Replaces whatever is being spoken (navigation, page changes).
-  interrupt: Option<Vec<u8>>,
-  /// Appended after it (installation progress).
-  queued: Vec<Vec<u8>>,
-}
-
 impl State {
-  fn compose(&mut self, now: Instant) -> Utterances {
+  /// What to say for this frame; it replaces whatever is being spoken.
+  fn compose(&mut self) -> Option<Vec<u8>> {
     let mut out = Speech::default();
     let first = !std::mem::replace(&mut self.greeted, true);
     if first {
@@ -725,50 +632,7 @@ impl State {
     std::mem::swap(&mut seen.context, &mut frame.context);
     seen.modal = frame.modal.take();
 
-    let mut utterances = Utterances::default();
-    if let Some(main) = out.finish() {
-      // Something more relevant is being said; a pending milestone is stale.
-      self.info = None;
-      utterances.interrupt = Some(main);
-    }
-    for msg in self.urgent.drain(..) {
-      utterances.queued.extend(Speech::once(&msg));
-    }
-    match std::mem::take(&mut self.urgent_dropped) {
-      0 => {}
-      1 => utterances
-        .queued
-        .extend(Speech::once("1 more message in the log")),
-      n => utterances
-        .queued
-        .extend(Speech::once(&format!("{n} more messages in the log"))),
-    }
-    if self.info.is_some()
-      && self
-        .info_at
-        .is_none_or(|t| now.duration_since(t) >= INFO_INTERVAL)
-    {
-      if let Some(info) = self.info.take() {
-        utterances.queued.extend(Speech::once(&info));
-      }
-      self.info_at = Some(now);
-    }
-    let busy = self.frame.busy.take();
-    if utterances.interrupt.is_some() || !utterances.queued.is_empty() {
-      self.last_spoken = Some(now);
-    } else if let Some(status) = busy {
-      match self.last_spoken {
-        // Silent long enough: reassure, with the latest progress line.
-        Some(t) if now.duration_since(t) >= BUSY_INTERVAL => {
-          let text = format!("Still working\n{status}");
-          utterances.queued.extend(Speech::once(&text));
-          self.last_spoken = Some(now);
-        }
-        Some(_) => {}
-        None => self.last_spoken = Some(now),
-      }
-    }
-    utterances
+    out.finish()
   }
 }
 
@@ -878,6 +742,7 @@ impl Default for Speech {
 }
 
 impl Speech {
+  #[cfg(test)]
   fn once(text: &str) -> Option<Vec<u8>> {
     let mut s = Self::default();
     s.text(text);
@@ -985,23 +850,9 @@ pub fn enable_for_tests() {
 pub fn utterance_for_tests() -> String {
   STATE.with_borrow_mut(|st| {
     st.greeted = true;
-    st.compose(Instant::now())
-      .interrupt
+    st.compose()
       .map(|b| String::from_utf8_lossy(&b).trim_end().to_string())
       .unwrap_or_default()
-  })
-}
-
-/// Test hook: what this thread's last frame would queue (progress).
-#[cfg(test)]
-pub fn queued_for_tests() -> Vec<String> {
-  STATE.with_borrow_mut(|st| {
-    st.greeted = true;
-    st.compose(Instant::now())
-      .queued
-      .iter()
-      .map(|b| String::from_utf8_lossy(b).trim_end().to_string())
-      .collect()
   })
 }
 
@@ -1028,8 +879,7 @@ mod tests {
       edit: None,
     });
     st.frame.context = context.into();
-    let u = st.compose(Instant::now());
-    u.interrupt
+    st.compose()
       .map(|b| String::from_utf8_lossy(&b).trim_end().to_string())
       .unwrap_or_default()
   }
@@ -1045,8 +895,7 @@ mod tests {
         secret,
       }),
     });
-    let u = st.compose(Instant::now());
-    u.interrupt
+    st.compose()
       .map(|b| String::from_utf8_lossy(&b).trim_end().to_string())
       .unwrap_or_default()
   }
@@ -1195,84 +1044,15 @@ mod tests {
   }
 
   #[test]
-  fn progress_is_throttled_but_errors_are_not() {
-    let mut st = state();
-    let t0 = Instant::now();
-    st.info = Some("first".into());
-    let u = st.compose(t0);
-    assert_eq!(u.queued.len(), 1);
-    st.info = Some("second".into());
-    st.info = Some("third".into());
-    st.urgent.push("Error: disk".into());
-    let u = st.compose(t0 + Duration::from_secs(1));
-    assert_eq!(u.queued.len(), 1, "error now, milestone held back");
-    let u = st.compose(t0 + INFO_INTERVAL);
-    assert_eq!(
-      u.queued,
-      vec![b"third\n".to_vec()],
-      "only the latest milestone"
-    );
-  }
-
-  #[test]
-  fn long_silent_work_gets_a_heartbeat() {
-    let mut st = state();
-    let t0 = Instant::now();
-    let busy = |st: &mut State, t: Instant, status: &str| {
-      st.frame.busy = Some(status.into());
-      st.compose(t).queued
-    };
-    st.last_spoken = Some(t0);
-    assert!(busy(&mut st, t0 + Duration::from_secs(10), "(1/9) linux").is_empty());
-    assert_eq!(
-      busy(&mut st, t0 + BUSY_INTERVAL, "(3/9) installing linux 40%"),
-      vec![b"Still working. (3/9) installing linux 40%\n".to_vec()]
-    );
-    // The heartbeat counts as speech: the next one waits another interval.
-    assert!(busy(&mut st, t0 + BUSY_INTERVAL + Duration::from_secs(5), "x").is_empty());
-  }
-
-  #[test]
   fn screen_reading_is_long_but_bounded_and_says_when_cut() {
     let mut st = state();
     st.screen = Some("word ".repeat(2000));
-    let main = st.compose(Instant::now()).interrupt.unwrap();
+    let main = st.compose().unwrap();
     assert!(main.len() > MAX_UTTERANCE && main.len() <= MAX_SCREEN + 30);
     assert!(main.ends_with(b"The rest was not read.\n"));
     let pieces: Vec<_> = chunks(&main, MAX_WRITE).collect();
     assert!(pieces.len() >= 2 && pieces.iter().all(|p| p.len() <= MAX_WRITE));
     assert_eq!(pieces.concat(), main);
-  }
-
-  #[test]
-  fn error_bursts_are_capped() {
-    let mut st = state();
-    for i in 0..10 {
-      if st.urgent.len() < MAX_URGENT {
-        st.urgent.push(format!("Warning: w{i}"));
-      } else {
-        st.urgent_dropped += 1;
-      }
-    }
-    let q = st.compose(Instant::now()).queued;
-    assert_eq!(q.len(), MAX_URGENT + 1);
-    assert_eq!(q.last().unwrap(), b"7 more messages in the log\n");
-  }
-
-  #[test]
-  fn progress_bars_are_not_read() {
-    assert_eq!(
-      strip_bars("(12/40) installing linux   [#####-----]  40%"),
-      "(12/40) installing linux 40%"
-    );
-    assert_eq!(strip_bars("keep [this] text"), "keep [this] text");
-    assert_eq!(
-      strip_bars("(841/841) checking keys ############## 100%"),
-      "(841/841) checking keys 100%"
-    );
-    assert_eq!(strip_bars("pacman  [--C o o]  12%"), "pacman 12%");
-    assert_eq!(strip_bars("a - b"), "a - b");
-    assert_eq!(strip_bars("open [### only"), "open [### only");
   }
 
   #[test]
@@ -1305,14 +1085,5 @@ mod tests {
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
     let (ppid, _) = parse_stat(&stat).unwrap();
     assert_eq!(ppid, std::os::unix::process::parent_id());
-  }
-
-  #[test]
-  fn navigation_drops_a_stale_milestone() {
-    let mut st = state();
-    st.info_at = Some(Instant::now());
-    st.info = Some("old".into());
-    frame(&mut st, "Install Steps", "x", "");
-    assert!(st.info.is_none());
   }
 }

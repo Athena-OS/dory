@@ -2079,9 +2079,6 @@ impl<'a> LogBox<'a> {
             continue;
           }
           let record = split_log_prefix(&stripped);
-          if let Some((level, msg)) = record {
-            a11y::progress(level, msg);
-          }
           self.push_line(log_line(&stripped, record));
         }
         _ => self.pending_line.push(ch),
@@ -2168,20 +2165,6 @@ impl<'a> ConfigWidget for LogBox<'a> {
     };
     f.render_widget(Paragraph::new(visible).wrap(Wrap { trim: true }), log_area);
     f.render_widget(Paragraph::new(live.to_vec()), live_area);
-
-    // The newest progress row (download/install bar) or log line: spoken
-    // only as a heartbeat after a long silence, never as a stream.
-    a11y::busy(|| {
-      let live = self.live_rows.iter().rev().find(|r| !r.trim().is_empty());
-      match live {
-        Some(row) => row.trim().to_string(),
-        None => self
-          .line_buf
-          .back()
-          .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-          .unwrap_or_default(),
-      }
-    });
   }
 
   fn focus(&mut self) {
@@ -2648,7 +2631,28 @@ mod tests {
   }
 
   #[test]
-  fn install_log_records_become_progress_but_raw_output_does_not() {
+  fn install_steps_are_spoken_when_they_change() {
+    a11y::enable_for_tests();
+    let mut steps = InstallSteps::new(
+      "Install Steps",
+      [(Line::from("Athena OS Installation..."), VecDeque::new())],
+    );
+    steps.steps[0].1 = StepStatus::Running;
+    let say = |steps: &InstallSteps| {
+      draw_frame(40, 6, |f| steps.render(f, f.area()));
+      a11y::utterance_for_tests()
+    };
+    assert_eq!(
+      say(&steps),
+      "Install Steps. Athena OS Installation... in progress"
+    );
+    assert_eq!(say(&steps), "", "the spinner is never spoken");
+    steps.steps[0].1 = StepStatus::Completed;
+    assert_eq!(say(&steps), "Install Steps. Athena OS Installation... done");
+  }
+
+  #[test]
+  fn the_install_log_is_never_spoken() {
     a11y::enable_for_tests();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dory.log");
@@ -2661,19 +2665,14 @@ mod tests {
       .unwrap()
       .write_all(
         b"[ INFO ] 10:00:00 Getting fastest mirrors\n\
-          (12/40) installing linux  [####] 30%\n\
-          [ DEBUG ] 10:00:01 noise\n\
+          [ WARN ] 10:00:01 'swapoff /dev/sda1' command failed\n\
           [ ERROR ] 10:00:02 Package installation failed with exit code 1\n",
       )
       .unwrap();
     lb.poll_log().unwrap();
-    assert_eq!(
-      a11y::queued_for_tests(),
-      vec![
-        "Error: Package installation failed with exit code 1".to_string(),
-        "Getting fastest mirrors".to_string(),
-      ]
-    );
+    draw_frame(80, 10, |f| lb.render(f, f.area()));
+    assert_eq!(lb.line_buf.len(), 3, "still shown on screen");
+    assert_eq!(a11y::utterance_for_tests(), "", "but never spoken");
   }
 
   #[test]
