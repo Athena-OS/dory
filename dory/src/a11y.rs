@@ -39,7 +39,7 @@ use std::{
   time::{Duration, Instant},
 };
 
-use log::debug;
+use log::info;
 use ratatui::{
   Terminal,
   backend::Backend,
@@ -89,24 +89,31 @@ struct Speaker {
 }
 
 impl Speaker {
-  fn open() -> Option<Self> {
-    let vt = console_name()?;
-    let synth = std::fs::read_to_string(format!("{SPEAKUP}/synth")).ok()?;
+  /// The reason is logged: it is the first thing to check when speech
+  /// does not start.
+  fn open() -> Result<Self, String> {
+    let vt = console_name().ok_or("not running on a virtual console")?;
+    let synth = std::fs::read_to_string(format!("{SPEAKUP}/synth"))
+      .map_err(|e| format!("speakup not loaded ({e})"))?;
     if matches!(synth.trim(), "" | "none") {
-      return None;
+      return Err("speakup has no synthesizer".into());
     }
     let wo = |name: &str| {
       OpenOptions::new()
         .write(true)
         .open(format!("{SPEAKUP}/{name}"))
+        .map_err(|e| format!("cannot open speakup {name} ({e})"))
     };
     let speaker = Self {
-      direct: wo("synth_direct").ok()?,
-      silent: wo("silent").ok()?,
-      active_vt: File::open(ACTIVE_VT).ok()?,
+      direct: wo("synth_direct")?,
+      silent: wo("silent")?,
+      active_vt: File::open(ACTIVE_VT).map_err(|e| format!("cannot read {ACTIVE_VT} ({e})"))?,
       vt,
     };
-    speaker.foreground().then_some(speaker)
+    if !speaker.foreground() {
+      return Err(format!("{} is not the foreground console", speaker.vt));
+    }
+    Ok(speaker)
   }
 
   /// `silent` acts on the foreground console: only touch it (and only
@@ -155,12 +162,45 @@ fn chunks(mut text: &[u8], max: usize) -> impl Iterator<Item = &[u8]> {
   })
 }
 
-/// `/dev/ttyN` on stdin, as `ttyN`. speakup only reads virtual consoles.
+/// The virtual console we are shown on, as `ttyN`.
+///
+/// Not simply stdin: `sudo` (use_pty, the default since sudo 1.9.14) runs
+/// the command on a fresh pseudo-terminal and relays it to the console. So
+/// walk up the process tree to the first process whose controlling
+/// terminal is a virtual console (`sudo dory` from tty1 finds tty1 two
+/// levels up). Over ssh or in a terminal emulator there is none.
 fn console_name() -> Option<String> {
-  let path = std::fs::read_link("/proc/self/fd/0").ok()?;
-  let name = path.to_str()?.strip_prefix("/dev/")?;
-  let num = name.strip_prefix("tty")?;
-  (!num.is_empty() && num.bytes().all(|b| b.is_ascii_digit())).then(|| name.to_string())
+  let mut pid = std::process::id();
+  for _ in 0..32 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (ppid, tty_nr) = parse_stat(&stat)?;
+    if let Some(n) = vt_number(tty_nr) {
+      return Some(format!("tty{n}"));
+    }
+    if ppid <= 1 {
+      return None;
+    }
+    pid = ppid;
+  }
+  None
+}
+
+/// `(ppid, tty_nr)` from `/proc/<pid>/stat`. The command name may contain
+/// spaces and parentheses, so fields are counted after the last ')'.
+fn parse_stat(stat: &str) -> Option<(u32, u32)> {
+  let rest = &stat[stat.rfind(')')? + 1..];
+  // state ppid pgrp session tty_nr
+  let mut fields = rest.split_ascii_whitespace();
+  let ppid = fields.nth(1)?.parse().ok()?;
+  let tty_nr = fields.nth(2)?.parse::<i64>().ok()?;
+  Some((ppid, u32::try_from(tty_nr).ok()?))
+}
+
+/// Virtual consoles are char device major 4, minors 1..=63.
+fn vt_number(tty_nr: u32) -> Option<u32> {
+  let major = (tty_nr >> 8) & 0xfff;
+  let minor = (tty_nr & 0xff) | ((tty_nr >> 12) & 0xfff00);
+  (major == 4 && (1..=63).contains(&minor)).then_some(minor)
 }
 
 static SPEAKER: OnceLock<Speaker> = OnceLock::new();
@@ -189,16 +229,19 @@ pub fn init(disabled: bool) -> Option<Session> {
   if disabled {
     return None;
   }
-  let Some(speaker) = Speaker::open() else {
-    debug!("a11y: speakup not active on this console, speech off");
-    return None;
+  let speaker = match Speaker::open() {
+    Ok(speaker) => speaker,
+    Err(why) => {
+      info!("Speech off: {why}");
+      return None;
+    }
   };
   let speaker = SPEAKER.get_or_init(|| speaker);
   // Handlers first: from the moment speakup is muted, every way out unmutes.
   restore_on_signal();
   SPEAKING.store(true, Ordering::SeqCst);
   speaker.silent(MUTE_AND_FLUSH);
-  debug!("a11y: speech on ({})", speaker.vt);
+  info!("Speech on ({})", speaker.vt);
   Some(Session(()))
 }
 
@@ -1194,6 +1237,30 @@ mod tests {
     edit_frame(&mut st, "a", 1, false);
     assert_eq!(edit_frame(&mut st, "a@", 2, false), "at");
     assert_eq!(edit_frame(&mut st, "a@,", 3, false), "comma");
+  }
+
+  #[test]
+  fn console_is_found_through_sudo() {
+    // sudo (use_pty) on tty1: dory's own terminal is a pty (major 136),
+    // the parent sudo still has tty1 (major 4, minor 1).
+    let pty = "4242 (dory) S 4241 4242 4240 34817 4242 4194560";
+    let sudo = "4240 (sudo) S 4239 4240 1000 1025 4240 4194560";
+    assert_eq!(parse_stat(pty), Some((4241, 34817)));
+    assert_eq!(vt_number(34817), None, "pts/1 is not a console");
+    assert_eq!(parse_stat(sudo), Some((4239, 1025)));
+    assert_eq!(vt_number(1025), Some(1));
+    assert_eq!(vt_number(1024 + 12), Some(12));
+    assert_eq!(vt_number(1024), None, "tty0 is the current-console alias");
+    assert_eq!(vt_number(0), None, "no controlling terminal");
+    // Command names with spaces and parentheses.
+    assert_eq!(parse_stat("7 (a) b (c)) S 1 7 7 1025 7"), Some((1, 1025)));
+  }
+
+  #[test]
+  fn real_proc_stat_parses() {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+    let (ppid, _) = parse_stat(&stat).unwrap();
+    assert_eq!(ppid, std::os::unix::process::parent_id());
   }
 
   #[test]
