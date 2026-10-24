@@ -207,7 +207,7 @@ fn render_header(f: &mut ratatui::Frame, title: &str) -> ratatui::layout::Rect {
       Constraint::Percentage(33)
     ]
   );
-  let help_text = Paragraph::new("Press '?' for help")
+  let help_text = Paragraph::new("Press F1 for help")
     .style(Style::default().fg(Color::Gray))
     .alignment(Alignment::Center);
   f.render_widget(help_text, header[0]);

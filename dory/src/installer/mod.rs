@@ -29,8 +29,8 @@ use tempfile::NamedTempFile;
 use crate::{
   drives::{Disk, DiskItem, part_table},
   installer::users::User,
-  split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_left, ui_right,
-  ui_up,
+  split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_help,
+  ui_help_or_qmark, ui_left, ui_right, ui_up,
   widget::{
     Button, ConfigWidget, FancyTicker, HelpModal, InfoBox, InstallSteps, LineEditor, LogBox,
     StrList, WidgetBox, WidgetBoxBuilder,
@@ -274,7 +274,7 @@ fn list_help(
   }
   lines.extend([
     help_line("Esc, q, ←, h", " - Cancel and return to menu"),
-    help_line("?", " - Show this help"),
+    help_line("F1", " - Show this help"),
     vec![(None, "")],
     vec![(None, blurb)],
   ]);
@@ -458,7 +458,7 @@ impl Menu {
       help_line("Tab, End, G", " - Move to action buttons"),
       help_line("Home, g", " - Return to menu options"),
       help_line("q", " - Quit installer"),
-      help_line("?", " - Show this help"),
+      help_line("F1", " - Show this help"),
       vec![(None, "")],
       vec![(
         None,
@@ -615,7 +615,7 @@ impl Page for Menu {
 
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help_or_qmark!() => {
         self.help_modal.toggle();
         Signal::Wait
       }
@@ -1029,7 +1029,7 @@ impl Page for ListPage {
 
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help!() => {
         self.help_modal.toggle();
         return Signal::Wait;
       }
@@ -1219,7 +1219,7 @@ impl Hostname {
       help_line("←/→", " - Move cursor"),
       help_line("Home/End", " - Jump to beginning/end"),
       help_line("Backspace/Del", " - Delete characters"),
-      help_line("?", " - Show this help"),
+      help_line("F1", " - Show this help"),
       vec![(None, "")],
       vec![(
         None,
@@ -1328,7 +1328,7 @@ impl Page for Hostname {
 
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help!() => {
         self.help_modal.toggle();
         Signal::Wait
       }
@@ -1375,7 +1375,7 @@ impl RootPassword {
       help_line("←/→", " - Move cursor"),
       help_line("Home/End", " - Jump to beginning/end"),
       help_line("Backspace/Del", " - Delete characters"),
-      help_line("?", " - Show this help"),
+      help_line("F1", " - Show this help"),
       vec![(None, "")],
       vec![(None, "Set a strong root password for system security.")],
     ]);
@@ -1514,7 +1514,7 @@ impl Page for RootPassword {
 
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help!() => {
         self.help_modal.toggle();
         Signal::Wait
       }
@@ -1802,12 +1802,12 @@ impl Page for ExtraPackages {
   }
 
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
-    if let KeyCode::Char('?') = event.code {
+    if let ui_help!() = event.code {
       self.help.toggle();
       return Signal::Wait;
     }
     if self.help.visible {
-      if let KeyCode::Esc = event.code {
+      if let KeyCode::Esc | ui_help!() = event.code {
         self.help.toggle();
       }
       return Signal::Wait;
@@ -1903,7 +1903,7 @@ impl ConfigPreview {
       help_line("Tab", " - Switch to buttons"),
       help_line("Enter", " - Activate selected button"),
       help_line("Esc", " - Go back to menu"),
-      help_line("?", " - Show this help"),
+      help_line("F1", " - Show this help"),
       vec![(None, "")],
       vec![(
         None,
@@ -2044,7 +2044,7 @@ impl Page for ConfigPreview {
 
   fn handle_input(&mut self, _installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help_or_qmark!() => {
         self.help_modal.toggle();
         Signal::Wait
       }
@@ -2196,7 +2196,7 @@ impl AgeVerification {
           (None, " - go back to the previous page"),
         ],
         vec![
-          (Some((Color::Yellow, Modifier::BOLD)), "?"),
+          (Some((Color::Yellow, Modifier::BOLD)), "F1"),
           (None, " - show this help"),
         ],
         vec![(None, "")],
@@ -2381,7 +2381,7 @@ impl Page for AgeVerification {
 
   fn handle_input(&mut self, _installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help_or_qmark!() => {
         self.help_modal.toggle();
         Signal::Wait
       }
@@ -2489,7 +2489,7 @@ impl<'a> InstallProgress<'a> {
 
     let help_content = styled_block(vec![
       help_line("Esc", " - Exit installation (if failed)"),
-      help_line("?", " - Show this help"),
+      help_line("F1", " - Show this help"),
       vec![(None, "")],
       vec![(
         None,
@@ -2627,7 +2627,7 @@ impl Page for InstallProgress<'_> {
       // InstallSteps kills the child on drop, so quitting mid-install is safe.
       return Signal::Quit;
     }
-    if self.help_modal.visible || event.code == KeyCode::Char('?') {
+    if self.help_modal.visible || matches!(event.code, ui_help_or_qmark!()) {
       self.help_modal.toggle();
       return Signal::Wait;
     }

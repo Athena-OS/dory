@@ -13,6 +13,5 @@ log.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-glob = "0.3"
 libc = "0.2"
 flexi_logger = { version = "0.31", features = ["colors"] }

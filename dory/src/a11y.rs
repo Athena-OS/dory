@@ -69,7 +69,7 @@ const MAX_SCREEN: usize = 6000;
 /// `synth_direct` stores at most a page per write.
 const MAX_WRITE: usize = 3500;
 const GREETING: &str = "Athena OS installer. Speech is on. \
-  F2 repeats, F3 reads the whole screen, question mark opens help.";
+  F1 opens help, F2 repeats, F3 reads the whole screen.";
 
 /// Keys handled by the speech layer itself (only while speech is on).
 pub const KEY_REPEAT: KeyCode = KeyCode::F(2);

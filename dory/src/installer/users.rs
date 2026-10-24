@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
   installer::{Installer, Page, Signal},
-  split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_up,
+  split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_help,
+  ui_help_or_qmark, ui_up,
   widget::{Button, ConfigWidget, HelpModal, LineEditor, StrList, TableWidget, WidgetBox},
 };
 
@@ -206,7 +207,7 @@ impl UserAccounts {
             ratatui::style::Color::Yellow,
             ratatui::style::Modifier::BOLD,
           )),
-          "?",
+          "F1",
         ),
         (None, " - Show this help"),
       ],
@@ -292,7 +293,7 @@ impl Page for UserAccounts {
     event: ratatui::crossterm::event::KeyEvent,
   ) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help_or_qmark!() => {
         self.help_modal.toggle();
         return Signal::Wait;
       }
@@ -689,7 +690,7 @@ impl Page for AddUser {
     }
 
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help!() => {
         self.help_modal.toggle();
         return Signal::Wait;
       }
@@ -1416,7 +1417,7 @@ impl Page for AlterUser {
     event: ratatui::crossterm::event::KeyEvent,
   ) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help!() => {
         self.help_modal.toggle();
         return Signal::Wait;
       }

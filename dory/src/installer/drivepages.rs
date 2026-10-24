@@ -15,7 +15,8 @@ use crate::{
     part_table,
   },
   installer::{Installer, Page, Signal},
-  split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_up,
+  split_hor, split_vert, styled_block, ui_back, ui_close, ui_down, ui_enter, ui_help,
+  ui_help_or_qmark, ui_up,
   widget::{
     Button, CheckBox, ConfigWidget, HelpModal, InfoBox, LineEditor, TableWidget, WidgetBox,
   },
@@ -122,7 +123,7 @@ impl<'a> Drives<'a> {
         (None, " - Return to main menu"),
       ],
       vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
+        (Some((Color::Yellow, Modifier::BOLD)), "F1"),
         (None, " - Show this help"),
       ],
       vec![(None, "")],
@@ -172,7 +173,7 @@ impl<'a> Page for Drives<'a> {
   }
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help_or_qmark!() => {
         self.help_modal.toggle();
         Signal::Wait
       }
@@ -240,7 +241,7 @@ impl SelectDrive {
         (None, " - Return to previous menu"),
       ],
       vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
+        (Some((Color::Yellow, Modifier::BOLD)), "F1"),
         (None, " - Show this help"),
       ],
       vec![(None, "")],
@@ -271,7 +272,7 @@ impl Page for SelectDrive {
   }
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help_or_qmark!() => {
         self.help_modal.toggle();
         Signal::Wait
       }
@@ -377,7 +378,7 @@ impl SelectFilesystem {
         (None, " - Return to previous menu"),
       ],
       vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
+        (Some((Color::Yellow, Modifier::BOLD)), "F1"),
         (None, " - Show this help"),
       ],
       vec![(None, "")],
@@ -688,7 +689,7 @@ impl Page for SelectFilesystem {
   }
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help_or_qmark!() => {
         self.help_modal.toggle();
         return Signal::Wait;
       }
@@ -825,7 +826,7 @@ impl SelectSwap {
         (None, " - Go back"),
       ],
       vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
+        (Some((Color::Yellow, Modifier::BOLD)), "F1"),
         (None, " - Help"),
       ],
       vec![(None, "")],
@@ -861,7 +862,7 @@ impl Page for SelectSwap {
 
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help_or_qmark!() => {
         self.help_modal.toggle();
         Signal::Wait
       }
@@ -933,7 +934,7 @@ impl ManualPartition {
         (None, " - Return to previous menu"),
       ],
       vec![
-        (Some((Color::Yellow, Modifier::BOLD)), "?"),
+        (Some((Color::Yellow, Modifier::BOLD)), "F1"),
         (None, " - Show this help"),
       ],
       vec![(None, "")],
@@ -999,7 +1000,7 @@ impl Page for ManualPartition {
   }
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help_or_qmark!() => {
         self.help_modal.toggle();
         return Signal::Wait;
       }
@@ -2585,7 +2586,7 @@ impl Page for PromptLuksPassword {
 
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help!() => {
         self.help_modal.toggle();
         return Signal::Wait;
       }
@@ -2761,7 +2762,7 @@ impl Page for AskEncryptRoot {
   fn handle_input(&mut self, installer: &mut Installer, event: KeyEvent) -> Signal {
     use KeyCode::*;
     match event.code {
-      KeyCode::Char('?') => {
+      ui_help_or_qmark!() => {
         self.help.toggle();
         Signal::Wait
       }

@@ -1566,7 +1566,7 @@ impl<'a> HelpModal<'a> {
     let help_paragraph = Paragraph::new(self.content.clone())
       .block(
         Block::default()
-          .title(format!("Help: {} (Press ? or ESC to close)", self.title))
+          .title(format!("Help: {} (Press F1 or ESC to close)", self.title))
           .borders(Borders::ALL)
           .border_style(Style::default().fg(Color::Yellow))
           .style(Style::default().bg(Color::Black)),
@@ -1638,7 +1638,7 @@ impl PackagePicker {
         (None, " - Add/remove package to/from selection"),
       ],
       vec![(bold, "/"), (None, " - Focus search bar")],
-      vec![(bold, "?"), (None, " - Show this help")],
+      vec![(bold, "F1"), (None, " - Show this help")],
       vec![(None, "")],
       vec![(
         None,
@@ -1820,7 +1820,7 @@ impl ConfigWidget for PackagePicker {
 
   fn handle_input(&mut self, event: KeyEvent) -> Signal {
     match event.code {
-      KeyCode::Char('?') => {
+      KeyCode::F(1) => {
         self.help_modal.toggle();
         return Signal::Wait;
       }

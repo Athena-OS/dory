@@ -308,10 +308,7 @@ pub fn install_config(inputs: &[ConfigInput], log_path: &str) -> i32 {
     }
   }
 
-  files::copy_multiple_files(
-    "/etc/NetworkManager/system-connections/*",
-    "/mnt/etc/NetworkManager/system-connections/",
-  );
+  network::copy_network_profiles();
 
   info!("Installation log file copied to /var/log/dory.log");
   files_eval(

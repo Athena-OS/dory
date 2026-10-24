@@ -2,6 +2,23 @@
 // These macros provide consistent keyboard shortcuts across the TUI
 
 #[macro_export]
+/// Key that opens the help modal on every page. F1 never collides with text
+/// input, so passwords and passphrases can contain '?'.
+macro_rules! ui_help {
+  () => {
+    KeyCode::F(1)
+  };
+}
+
+#[macro_export]
+/// Help key for pages without text fields: F1 or '?' (vi-style).
+macro_rules! ui_help_or_qmark {
+  () => {
+    KeyCode::F(1) | KeyCode::Char('?')
+  };
+}
+
+#[macro_export]
 /// Keys for closing/quitting: Escape
 macro_rules! ui_close {
   () => {

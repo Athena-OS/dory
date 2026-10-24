@@ -1,5 +1,4 @@
 use crate::strings::crash;
-use glob::glob;
 use log::info;
 use regex::Regex;
 use std::fs::{self, File, OpenOptions};
@@ -25,27 +24,6 @@ pub fn copy_file(path: &str, destpath: &str) {
       format!("Copy {path} to {destpath}: Failed with error {e}"),
       1,
     ),
-  }
-}
-
-pub fn copy_multiple_files(pattern: &str, dest_dir: &str) {
-  if let Err(e) = create_directory(dest_dir) {
-    crash(format!("Failed to create directory {dest_dir}: {e}"), 1);
-  }
-
-  let paths = match glob(pattern) {
-    Ok(paths) => paths,
-    Err(e) => crash(format!("Invalid glob pattern {pattern}: {e}"), 1),
-  };
-  for entry in paths {
-    match entry {
-      Ok(path) if path.is_file() => {
-        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
-        copy_file(&path.to_string_lossy(), &format!("{dest_dir}/{file_name}"));
-      }
-      Ok(_) => {}
-      Err(e) => crash(format!("Error processing pattern {pattern}: {e}"), 1),
-    }
   }
 }
 
