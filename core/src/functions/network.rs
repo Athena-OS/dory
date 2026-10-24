@@ -73,7 +73,6 @@ fn copy_network_profiles_between(src: &Path, dst: &Path) {
     warn!("Cannot create {}: {e}", dst.display());
     return;
   }
-  let _ = fs::set_permissions(dst, fs::Permissions::from_mode(0o700));
 
   let mut copied = 0;
   for entry in entries.flatten() {
@@ -123,10 +122,6 @@ mod tests {
     assert_eq!(
       std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777,
       0o600
-    );
-    assert_eq!(
-      std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
-      0o700
     );
     assert!(!dst.join("README").exists());
   }
